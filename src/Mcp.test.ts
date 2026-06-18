@@ -1,5 +1,13 @@
-import { Mcp, z } from 'incur'
+import { Cli, Mcp, Plugins, z } from 'incur'
 import { PassThrough } from 'node:stream'
+
+import { startTestServer } from '../test/fixtures/connectrpc/server.js'
+import { UserService } from '../test/fixtures/connectrpc/user_pb.js'
+import {
+  introspection as graphqlIntrospection,
+  startTestServer as startGraphqlTestServer,
+} from '../test/fixtures/graphql/server.js'
+import { toCommands } from './Cli.js'
 
 function createTestCommands() {
   const commands = new Map<string, any>()
@@ -57,6 +65,49 @@ function createTestCommands() {
     },
   })
 
+  commands.set('destroy', {
+    description: 'Delete everything',
+    destructive: true,
+    mutates: true,
+    run() {
+      return { ok: true }
+    },
+  })
+
+  commands.set('deploy', {
+    description: 'Deploy a service',
+    body: z.object({
+      region: z.string(),
+      replicas: z.number().default(1),
+    }),
+    options: z.object({
+      region: z.string().optional(),
+      replicas: z.number().default(1),
+    }),
+    run(c: any) {
+      return c.options
+    },
+  })
+
+  const issueUpdateInput = z.object({
+    id: z.string(),
+    input: z.object({
+      email: z.string().optional(),
+    }),
+  })
+
+  commands.set('issue-update', {
+    args: z.object({ id: z.string() }),
+    description: 'Update an issue with a mixed scalar and input payload',
+    input: issueUpdateInput,
+    options: z.object({
+      id: z.string().optional(),
+    }),
+    run(c: any) {
+      return issueUpdateInput.parse({ ...c.options, ...c.args })
+    },
+  })
+
   return commands
 }
 
@@ -92,6 +143,15 @@ async function mcpSession(
   return chunks.map((c) => JSON.parse(c.trim()))
 }
 
+async function resolveCommands(cli: Cli.Cli) {
+  await cli.serve(['--llms', '--format', 'json'], {
+    exit() {},
+    stdout() {},
+    stderr() {},
+  })
+  return toCommands.get(cli)!
+}
+
 describe('Mcp', () => {
   test('initialize responds with server info', async () => {
     const [res] = await mcpSession(createTestCommands(), [
@@ -125,13 +185,26 @@ describe('Mcp', () => {
       { id: 2, method: 'tools/list', params: {} },
     ])
     const names = res.result.tools.map((t: any) => t.name).sort()
-    expect(names).toEqual(['echo', 'fail', 'greet_hello', 'ping', 'stream'])
+    expect(names).toEqual([
+      'deploy',
+      'destroy',
+      'echo',
+      'fail',
+      'greet_hello',
+      'issue_update',
+      'ping',
+      'stream',
+    ])
 
     const echoTool = res.result.tools.find((t: any) => t.name === 'echo')
     expect(echoTool.description).toBe('Echo a message')
     expect(echoTool.inputSchema.properties.message).toBeDefined()
     expect(echoTool.inputSchema.properties.upper).toBeDefined()
     expect(echoTool.inputSchema.required).toContain('message')
+
+    const destroyTool = res.result.tools.find((t: any) => t.name === 'destroy')
+    expect(destroyTool.description).toContain('confirm with user before executing')
+    expect(destroyTool.inputSchema.properties.dryRun).toBeDefined()
   })
 
   test('notifications are ignored (no response)', async () => {
@@ -230,6 +303,48 @@ describe('Mcp', () => {
     expect(res.result.content).toEqual([
       { type: 'text', text: '[{"content":"hello"},{"content":"world"}]' },
     ])
+  })
+
+  test('tools/call resolves injected json payload through shared option parsing', async () => {
+    const [, res] = await mcpSession(createTestCommands(), [
+      { id: 1, method: 'initialize', params: initParams },
+      {
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'deploy',
+          arguments: { json: '{"region":"us-central1","replicas":3}' },
+        },
+      },
+    ])
+    expect({
+      type: res.result.content[0].type,
+      data: JSON.parse(res.result.content[0].text),
+    }).toEqual({
+      type: 'text',
+      data: { region: 'us-central1', replicas: 3 },
+    })
+  })
+
+  test('tools/call merges json payload with scalar args for input commands', async () => {
+    const [, res] = await mcpSession(createTestCommands(), [
+      { id: 1, method: 'initialize', params: initParams },
+      {
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'issue_update',
+          arguments: { id: 'ISS-1', json: '{"input":{"email":"issue@example.com"}}' },
+        },
+      },
+    ])
+    expect({
+      type: res.result.content[0].type,
+      data: JSON.parse(res.result.content[0].text),
+    }).toEqual({
+      type: 'text',
+      data: { id: 'ISS-1', input: { email: 'issue@example.com' } },
+    })
   })
 
   test('middleware runs for tool calls', async () => {
@@ -369,7 +484,7 @@ describe('Mcp', () => {
 
     const [, res] = await mcpSession(commands, [
       { id: 1, method: 'initialize', params: initParams },
-      { id: 2, method: 'tools/call', params: { name: 'check-env', arguments: {} } },
+      { id: 2, method: 'tools/call', params: { name: 'check_env', arguments: {} } },
     ])
     const data = JSON.parse(res.result.content[0].text)
     expect(data.val).toBe('default-val')
@@ -409,5 +524,135 @@ describe('Mcp', () => {
     expect(progress[1].params.message).toBe('{"content":"world"}')
     expect(progress[0].params.progress).toBe(1)
     expect(progress[1].params.progress).toBe(2)
+  })
+
+  test('plugin-generated commands project to underscore MCP tool names', async () => {
+    const server = await startTestServer('connect')
+    try {
+      const cli = Cli.create('acme').plugin(
+        'users',
+        Plugins.connectRpc({
+          service: UserService,
+          transport: {
+            baseUrl: server.baseUrl,
+            protocol: 'connect',
+          },
+          positionals: {
+            getUser: ['userId'],
+          },
+        }),
+      )
+
+      const commands = await resolveCommands(cli)
+      const names = Mcp.collectTools(commands, []).map((tool) => tool.name)
+      expect(names).toContain('users_get_user')
+      expect(names).toContain('users_list_users')
+      expect(names).toContain('users_watch_users')
+    } finally {
+      await server.close()
+    }
+  })
+
+  test('CLI and MCP reuse the same generated handler behavior', async () => {
+    const server = await startTestServer('connect')
+    try {
+      const cli = Cli.create('acme').plugin(
+        'users',
+        Plugins.connectRpc({
+          service: UserService,
+          transport: {
+            baseUrl: server.baseUrl,
+            protocol: 'connect',
+          },
+          positionals: {
+            getUser: ['userId'],
+          },
+        }),
+      )
+
+      let cliOutput = ''
+      await cli.serve(['users', 'get-user', 'u-1', '--format', 'json'], {
+        stdout(s) {
+          cliOutput += s
+        },
+        stderr(s) {
+          cliOutput += s
+        },
+        exit() {},
+      })
+
+      const commands = await resolveCommands(cli)
+      const tool = Mcp.collectTools(commands, []).find((entry) => entry.name === 'users_get_user')!
+      const result = await Mcp.callTool(tool, { userId: 'u-1' })
+
+      expect(JSON.parse(cliOutput)).toEqual(JSON.parse(result.content[0]!.text))
+    } finally {
+      await server.close()
+    }
+  })
+
+  test('graphql-generated commands project to underscore MCP tool names', async () => {
+    const server = await startGraphqlTestServer()
+    try {
+      const cli = Cli.create('acme').plugin(
+        'graphql',
+        Plugins.graphql({
+          schema: graphqlIntrospection,
+          transport: {
+            url: server.baseUrl,
+          },
+        }),
+      )
+
+      const commands = await resolveCommands(cli)
+      const names = Mcp.collectTools(commands, []).map((tool) => tool.name)
+      expect(names).toContain('graphql_get_user')
+      expect(names).toContain('graphql_list_users')
+      expect(names).toContain('graphql_raw')
+      expect(names).toContain('graphql_update_user')
+    } finally {
+      await server.close()
+    }
+  })
+
+  test('rejects duplicate MCP tool names after underscore projection', () => {
+    const commands = new Map<string, any>([
+      [
+        'foo-bar',
+        {
+          _group: true,
+          commands: new Map([
+            [
+              'baz',
+              {
+                run() {
+                  return { ok: true }
+                },
+              },
+            ],
+          ]),
+        },
+      ],
+      [
+        'foo',
+        {
+          _group: true,
+          commands: new Map([
+            [
+              'bar-baz',
+              {
+                run() {
+                  return { ok: true }
+                },
+              },
+            ],
+          ]),
+        },
+      ],
+    ])
+
+    expect(() => Mcp.collectTools(commands, [])).toThrow(
+      "MCP tool name collision for 'foo_bar_baz': 'foo-bar baz' and 'foo bar-baz'",
+    )
   })
 })

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 
+import { getEffectiveOptionsSchema, resolveCommandOptions } from '../CommandOptions.js'
 import type { FieldError } from '../Errors.js'
 import { IncurError, ValidationError } from '../Errors.js'
 import type { Context as MiddlewareContext, Handler as MiddlewareHandler } from '../middleware.js'
@@ -66,6 +67,7 @@ export async function execute(command: any, options: execute.Options): Promise<e
     // Parse args and options
     let args: Record<string, unknown>
     let parsedOptions: Record<string, unknown>
+    const effectiveOptions = getEffectiveOptionsSchema(command)
 
     if (parseMode === 'argv') {
       // CLI mode: parse both args and options from argv tokens
@@ -73,7 +75,7 @@ export async function execute(command: any, options: execute.Options): Promise<e
         alias: command.alias as Record<string, string> | undefined,
         args: command.args,
         defaults: options.defaults,
-        options: command.options,
+        options: effectiveOptions,
       })
       args = parsed.args
       parsedOptions = parsed.options
@@ -81,13 +83,19 @@ export async function execute(command: any, options: execute.Options): Promise<e
       // HTTP mode: positional args from URL path segments, options from body/query
       const parsed = Parser.parse(argv, { args: command.args })
       args = parsed.args
-      parsedOptions = command.options ? command.options.parse(inputOptions) : {}
+      parsedOptions = effectiveOptions ? effectiveOptions.parse(inputOptions) : {}
     } else {
       // MCP mode: all params come from inputOptions, split into args vs options
       const split = splitParams(inputOptions, command)
       args = command.args ? command.args.parse(split.args) : {}
-      parsedOptions = command.options ? command.options.parse(split.options) : {}
+      parsedOptions = effectiveOptions ? effectiveOptions.parse(split.options) : {}
     }
+
+    // Resolve injected control options (dryRun, json payload) and merge
+    const { control, options: resolvedOptions } = resolveCommandOptions(
+      command,
+      parsedOptions as Record<string, unknown>,
+    )
 
     // Parse env
     const commandEnv = command.env ? Parser.parseEnv(command.env, envSource) : {}
@@ -103,17 +111,44 @@ export async function execute(command: any, options: execute.Options): Promise<e
       retryable?: boolean | undefined
     }): never => ({ [sentinel]: 'error', ...opts }) as never
 
+    // Short-circuit when dry-run is requested: return the resolved context without executing.
+    // This lets users validate inputs and see what would run without side effects.
+    // `path` (not `name`) is the resolved command path (e.g. "deploy"), matching the
+    // caller's expectation that `command` identifies the subcommand, not the CLI binary name.
+    if (control.dryRun) {
+      result = {
+        ok: true,
+        data: {
+          dryRun: true,
+          command: path,
+          args,
+          options: resolvedOptions,
+        },
+      }
+      resolveResultReady!()
+      return
+    }
+
     const raw = command.run({
       agent,
       args,
       displayName,
+      dryRun: control.dryRun,
       env: commandEnv,
       error: errorFn,
       format,
       formatExplicit,
       name,
       ok: okFn,
-      options: parsedOptions,
+      options: resolvedOptions,
+      // Expose the transport mode so handlers that interact with
+      // `process.stdin` (e.g. the GraphQL `raw` command) can distinguish
+      // a CLI invocation (where stdin is the caller's real input stream)
+      // from MCP/HTTP transports (where `process.stdin` is the protocol
+      // pipe and reading it would corrupt or hang the server). Using
+      // `agent` for this is wrong: `agent` is also true for non-TTY CLI
+      // invocations like tests, CI, and shell pipes.
+      parseMode,
       var: varsMap,
       version,
     })

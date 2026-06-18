@@ -1,5 +1,14 @@
-import { Cli, Errors, Fetch, Skill, Typegen, z } from 'incur'
+import { Cli, Errors, Fetch, Plugins, Skill, Typegen, z } from 'incur'
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
+import { startTestServer } from '../test/fixtures/connectrpc/server.js'
+import { UserService } from '../test/fixtures/connectrpc/user_pb.js'
+import {
+  introspection as graphqlIntrospection,
+  startTestServer as startGraphqlTestServer,
+} from '../test/fixtures/graphql/server.js'
 import { app as honoApp } from '../test/fixtures/hono-api.js'
 import { spec as openapiSpec } from '../test/fixtures/openapi-spec.js'
 
@@ -2687,6 +2696,49 @@ describe('fetch api', () => {
     `)
   })
 
+  test('GET query params use CLI coercion rules', async () => {
+    const cli = Cli.create('test').command('list', {
+      options: z.object({
+        archived: z.boolean().default(false),
+        limit: z.number(),
+        tag: z.array(z.string()).default([]),
+      }),
+      run(c) {
+        return {
+          archived: c.options.archived,
+          limit: c.options.limit,
+          tag: c.options.tag,
+        }
+      },
+    })
+
+    expect(
+      await fetchJson(
+        cli,
+        new Request('http://localhost/list?limit=5&archived=true&tag=alpha&tag=beta'),
+      ),
+    ).toMatchInlineSnapshot(`
+      {
+        "body": {
+          "data": {
+            "archived": true,
+            "limit": 5,
+            "tag": [
+              "alpha",
+              "beta",
+            ],
+          },
+          "meta": {
+            "command": "list",
+            "duration": "<stripped>",
+          },
+          "ok": true,
+        },
+        "status": 200,
+      }
+    `)
+  })
+
   test('POST with JSON body → options', async () => {
     const cli = createApp()
     const req = new Request('http://localhost/project/create/MyProject', {
@@ -2920,6 +2972,157 @@ describe('fetch api', () => {
     `)
   })
 
+  test('fetch gateway runs root and group middleware before forwarding', async () => {
+    const order: string[] = []
+    const api = Cli.create('api')
+      .use(async (_c, next) => {
+        order.push('group:before')
+        await next()
+        order.push('group:after')
+      })
+      .command('proxy', {
+        fetch(req) {
+          order.push('gateway')
+          return new Response(JSON.stringify({ path: new URL(req.url).pathname }), {
+            headers: { 'content-type': 'application/json' },
+          })
+        },
+      })
+    const cli = Cli.create('test')
+      .use(async (_c, next) => {
+        order.push('root:before')
+        await next()
+        order.push('root:after')
+      })
+      .command(api)
+
+    const res = await cli.fetch(new Request('http://localhost/api/proxy/users'))
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ path: '/api/proxy/users' })
+    expect(order).toEqual(['root:before', 'group:before', 'gateway', 'group:after', 'root:after'])
+  })
+
+  test('fetch composes root, group, and command middleware', async () => {
+    const order: string[] = []
+    const admin = Cli.create('admin')
+      .use(async (_c, next) => {
+        order.push('group:before')
+        await next()
+        order.push('group:after')
+      })
+      .command('reset', {
+        middleware: [
+          async (_c, next) => {
+            order.push('command:before')
+            await next()
+            order.push('command:after')
+          },
+        ],
+        run() {
+          order.push('handler')
+          return { reset: true }
+        },
+      })
+    const cli = Cli.create('test')
+      .use(async (_c, next) => {
+        order.push('root:before')
+        await next()
+        order.push('root:after')
+      })
+      .command(admin)
+
+    expect(await fetchJson(cli, new Request('http://localhost/admin/reset')))
+      .toMatchInlineSnapshot(`
+      {
+        "body": {
+          "data": {
+            "reset": true,
+          },
+          "meta": {
+            "command": "admin reset",
+            "duration": "<stripped>",
+          },
+          "ok": true,
+        },
+        "status": 200,
+      }
+    `)
+    expect(order).toEqual([
+      'root:before',
+      'group:before',
+      'command:before',
+      'handler',
+      'command:after',
+      'group:after',
+      'root:after',
+    ])
+  })
+
+  test('fetch parses CLI and command env schemas', async () => {
+    const savedCliEnv = process.env.INCUR_FETCH_CLI_TOKEN
+    const savedCommandEnv = process.env.INCUR_FETCH_COMMAND_TOKEN
+
+    delete process.env.INCUR_FETCH_CLI_TOKEN
+    delete process.env.INCUR_FETCH_COMMAND_TOKEN
+
+    try {
+      let capturedEnv: { INCUR_FETCH_CLI_TOKEN: string } | undefined
+      const cli = Cli.create('test', {
+        env: z.object({ INCUR_FETCH_CLI_TOKEN: z.string() }),
+      })
+        .use(async (c, next) => {
+          capturedEnv = c.env
+          await next()
+        })
+        .command('show', {
+          env: z.object({ INCUR_FETCH_COMMAND_TOKEN: z.string() }),
+          run(c) {
+            return {
+              cliToken: capturedEnv?.INCUR_FETCH_CLI_TOKEN,
+              commandToken: c.env.INCUR_FETCH_COMMAND_TOKEN,
+            }
+          },
+        })
+
+      expect(await fetchJson(cli, new Request('http://localhost/show'))).toMatchObject({
+        status: 400,
+        body: {
+          ok: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+          },
+        },
+      })
+
+      process.env.INCUR_FETCH_CLI_TOKEN = 'cli-secret'
+      process.env.INCUR_FETCH_COMMAND_TOKEN = 'command-secret'
+
+      expect(await fetchJson(cli, new Request('http://localhost/show'))).toMatchInlineSnapshot(`
+        {
+          "body": {
+            "data": {
+              "cliToken": "cli-secret",
+              "commandToken": "command-secret",
+            },
+            "meta": {
+              "command": "show",
+              "duration": "<stripped>",
+            },
+            "ok": true,
+          },
+          "status": 200,
+        }
+      `)
+    } finally {
+      if (savedCliEnv === undefined) delete process.env.INCUR_FETCH_CLI_TOKEN
+      else process.env.INCUR_FETCH_CLI_TOKEN = savedCliEnv
+
+      if (savedCommandEnv === undefined) delete process.env.INCUR_FETCH_COMMAND_TOKEN
+      else process.env.INCUR_FETCH_COMMAND_TOKEN = savedCommandEnv
+    }
+  })
+
   describe('mcp over http', () => {
     function mcpRequest(cli: Cli.Cli<any, any, any>, body: unknown, sessionId?: string) {
       const headers: Record<string, string> = {
@@ -3000,7 +3203,7 @@ describe('fetch api', () => {
           "config",
           "echo",
           "explode",
-          "explode-clac",
+          "explode_clac",
           "noop",
           "ping",
           "project_create",
@@ -3012,11 +3215,11 @@ describe('fetch api', () => {
           "project_list",
           "slow",
           "stream",
-          "stream-error",
-          "stream-ok",
-          "stream-text",
-          "stream-throw",
-          "validate-fail",
+          "stream_error",
+          "stream_ok",
+          "stream_text",
+          "stream_throw",
+          "validate_fail",
         ]
       `)
     })
@@ -3251,6 +3454,231 @@ describe('.well-known/skills', () => {
   })
 })
 
+describe('connectRpc e2e', () => {
+  test('raw JSON request input works on generated commands', async () => {
+    const server = await startTestServer('connect')
+    try {
+      const cli = Cli.create('acme').plugin(
+        'users',
+        Plugins.connectRpc({
+          service: UserService,
+          transport: {
+            baseUrl: server.baseUrl,
+            protocol: 'connect',
+          },
+          positionals: {
+            getUser: ['userId'],
+          },
+        }),
+      )
+
+      const { output } = await serve(cli, [
+        'users',
+        'list-users',
+        '--json',
+        '{"status":"disabled","page":{"pageSize":2,"cursor":"cursor-1"}}',
+        '--format',
+        'json',
+      ])
+
+      expect(json(output)).toMatchObject({
+        nextCursor: 'cursor-1-next',
+        users: [{ status: 'disabled' }, { status: 'disabled' }],
+      })
+    } finally {
+      await server.close()
+    }
+  })
+
+  test('server-streaming generated commands support jsonl output', async () => {
+    const server = await startTestServer('connect')
+    try {
+      const cli = Cli.create('acme').plugin(
+        'users',
+        Plugins.connectRpc({
+          service: UserService,
+          transport: {
+            baseUrl: server.baseUrl,
+            protocol: 'connect',
+          },
+        }),
+      )
+
+      const { output } = await serve(cli, ['users', 'watch-users', '--format', 'jsonl'])
+      expect(
+        output
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line)),
+      ).toMatchObject([
+        { type: 'chunk', data: { eventType: 'updated' } },
+        { type: 'chunk', data: { eventType: 'deleted' } },
+        { type: 'done', ok: true },
+      ])
+    } finally {
+      await server.close()
+    }
+  })
+
+  test('generated RPC failures surface stable structured errors', async () => {
+    const server = await startTestServer('connect')
+    try {
+      const cli = Cli.create('acme').plugin(
+        'users',
+        Plugins.connectRpc({
+          service: UserService,
+          transport: {
+            baseUrl: server.baseUrl,
+            protocol: 'connect',
+          },
+          positionals: {
+            getUser: ['userId'],
+          },
+        }),
+      )
+
+      const { output, exitCode } = await serve(cli, [
+        'users',
+        'get-user',
+        'bad',
+        '--format',
+        'json',
+      ])
+
+      expect(exitCode).toBe(1)
+      expect(json(output)).toMatchObject({
+        code: 'RPC_INVALID_ARGUMENT',
+        message: 'user id is invalid',
+        retryable: false,
+      })
+    } finally {
+      await server.close()
+    }
+  })
+})
+
+describe('graphql e2e', () => {
+  test('generated graphql commands execute against the live endpoint', async () => {
+    const server = await startGraphqlTestServer()
+    try {
+      const cli = Cli.create('acme').plugin(
+        'graphql',
+        Plugins.graphql({
+          schema: graphqlIntrospection,
+          transport: {
+            url: server.baseUrl,
+          },
+        }),
+      )
+
+      const { output } = await serve(cli, [
+        'graphql',
+        'get-user',
+        '--userId',
+        'u-1',
+        '--format',
+        'json',
+      ])
+
+      expect(json(output)).toEqual({
+        email: 'u-1@acme.dev',
+        id: 'u-1',
+        manager: {
+          email: 'u-1-mgr-1@acme.dev',
+          id: 'u-1-mgr-1',
+          status: 'ACTIVE',
+        },
+        status: 'ACTIVE',
+      })
+    } finally {
+      await server.close()
+    }
+  })
+
+  test('raw graphql supports file-backed documents and operation names', async () => {
+    const server = await startGraphqlTestServer()
+    const dir = await mkdtemp(join(tmpdir(), 'incur-graphql-e2e-'))
+    const file = join(dir, 'ops.graphql')
+    await writeFile(
+      file,
+      [
+        'query GetUser($userId: ID!) { getUser(userId: $userId) { id email status } }',
+        'query ListUsers($limit: Int) { listUsers(limit: $limit) { nextCursor } }',
+      ].join('\n'),
+      'utf8',
+    )
+
+    try {
+      const cli = Cli.create('acme').plugin(
+        'graphql',
+        Plugins.graphql({
+          schema: graphqlIntrospection,
+          transport: {
+            url: server.baseUrl,
+          },
+        }),
+      )
+
+      const { output } = await serve(cli, [
+        'graphql',
+        'raw',
+        '--file',
+        file,
+        '--operation-name',
+        'ListUsers',
+        '--variables',
+        '{"limit":1}',
+        '--format',
+        'json',
+      ])
+
+      expect(json(output)).toEqual({
+        listUsers: {
+          nextCursor: 'cursor-1',
+        },
+      })
+    } finally {
+      await server.close()
+    }
+  })
+
+  test('graphql errors surface stable structured errors', async () => {
+    const server = await startGraphqlTestServer()
+    try {
+      const cli = Cli.create('acme').plugin(
+        'graphql',
+        Plugins.graphql({
+          schema: graphqlIntrospection,
+          transport: {
+            url: server.baseUrl,
+          },
+        }),
+      )
+
+      const { output, exitCode } = await serve(cli, [
+        'graphql',
+        'raw',
+        '--query',
+        'query GetUser($userId: ID!) { getUser(userId: $userId) { id } }',
+        '--operation-name',
+        'GetUser',
+        '--variables',
+        '{"userId":"missing"}',
+        '--format',
+        'json',
+      ])
+
+      expect(exitCode).toBe(1)
+      expect(json(output)).toMatchObject({
+        code: 'GRAPHQL_OPERATION_FAILED',
+        message: 'user was not found',
+      })
+    } finally {
+      await server.close()
+    }
+  })
+})
+
 async function serve(
   cli: { serve: Cli.Cli['serve'] },
   argv: string[],
@@ -3260,6 +3688,9 @@ async function serve(
   let exitCode: number | undefined
   await cli.serve(argv, {
     stdout(s) {
+      output += s
+    },
+    stderr(s) {
       output += s
     },
     exit(code) {

@@ -197,9 +197,28 @@ export function install(sourceDir: string, options: install.Options = {}): insta
 
   const paths: string[] = []
   const agents: install.AgentInstall[] = []
+  const canonicalBaseResolved = path.resolve(canonicalBase)
 
   for (const skill of discoverSkills(sourceDir)) {
     const canonicalDir = path.join(canonicalBase, skill.name)
+
+    // Backstop containment check. `sanitizeName()` collapses `..` to `''`,
+    // and `path.join(base, '')` equals `base` — so a SKILL.md whose
+    // frontmatter `name:` is `..` would otherwise resolve `canonicalDir` to
+    // `canonicalBase` itself and the `rmForce` below would wipe every
+    // installed skill in one shot. Refuse to install any skill whose
+    // resolved canonical path is not strictly inside `canonicalBase`. This
+    // is independent of the per-name validation in `SyncSkills.sync()` so
+    // any future caller (or any unsafe sanitizer edge case) inherits the
+    // protection automatically.
+    const canonicalDirResolved = path.resolve(canonicalDir)
+    if (
+      canonicalDirResolved === canonicalBaseResolved ||
+      !canonicalDirResolved.startsWith(canonicalBaseResolved + path.sep)
+    )
+      throw new Error(
+        `refusing to install skill: resolved path ${canonicalDirResolved} escapes canonical skills directory ${canonicalBaseResolved}`,
+      )
 
     // Copy to canonical location
     rmForce(canonicalDir)
@@ -305,8 +324,11 @@ function discoverSkills(rootDir: string): { name: string; dir: string; root?: bo
       const skillPath = path.join(subDir, 'SKILL.md')
       if (fs.existsSync(skillPath)) {
         const content = fs.readFileSync(skillPath, 'utf8')
-        const nameMatch = content.match(/^name:\s*(.+)$/m)
-        results.push({ name: sanitizeName(nameMatch?.[1] ?? entry.name), dir: subDir })
+        // `\s*` matches newlines and would let an empty `name:` line slide
+        // its capture into the next line (e.g. the YAML `---` delimiter).
+        // Use `[^\S\n]*` so the match stays anchored to the `name:` line.
+        const nameMatch = content.match(/^name:[^\S\n]*(.*)$/m)
+        results.push({ name: sanitizeName(nameMatch?.[1]?.trim() ?? entry.name), dir: subDir })
       }
       visit(subDir)
     }
@@ -318,8 +340,8 @@ function discoverSkills(rootDir: string): { name: string; dir: string; root?: bo
   const rootSkill = path.join(rootDir, 'SKILL.md')
   if (fs.existsSync(rootSkill)) {
     const content = fs.readFileSync(rootSkill, 'utf8')
-    const nameMatch = content.match(/^name:\s*(.+)$/m)
-    const name = sanitizeName(nameMatch?.[1] ?? 'skill')
+    const nameMatch = content.match(/^name:[^\S\n]*(.*)$/m)
+    const name = sanitizeName(nameMatch?.[1]?.trim() || 'skill')
     if (!results.some((r) => r.name === name)) results.push({ name, dir: rootDir, root: true })
   }
 
