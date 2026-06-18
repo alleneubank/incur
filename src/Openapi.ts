@@ -88,7 +88,7 @@ type Operation = {
 
 type Parameter = {
   description?: string | undefined
-  in: 'cookie' | 'header' | 'path' | 'query'
+  in: 'body' | 'cookie' | 'header' | 'path' | 'query'
   name: string
   required?: boolean | undefined
   schema?: Record<string, unknown> | undefined
@@ -119,8 +119,21 @@ type FetchHandler = (req: Request) => Response | Promise<Response>
 /** A generated command entry compatible with incur's internal CommandEntry. */
 type GeneratedCommand = {
   args?: z.ZodObject<any> | undefined
+  /**
+   * Request body schema. Object-shaped bodies get their properties
+   * flattened into `--<prop>` option flags; array and primitive bodies
+   * are accepted via the injected `--json` payload or the explicit
+   * `--body` JSON escape hatch. Widened from `z.ZodObject<any>` so
+   * non-object schemas can participate in the `--json` injection path
+   * without silent data loss.
+   */
+  body?: z.ZodType | undefined
   description?: string | undefined
+  destructive?: boolean | undefined
+  mutates?: boolean | undefined
+  openapi?: Record<string, unknown> | undefined
   options?: z.ZodObject<any> | undefined
+  output?: z.ZodType | undefined
   run: (context: any) => any
 }
 
@@ -385,10 +398,37 @@ export async function generateCommands(
       ...(op.parameters ?? []).filter((p) => p.in === 'header'),
       ...securityHeaderParams(resolved, op),
     ])
+    const swagger2BodyParam = (op.parameters ?? []).find((p) => p.in === 'body')
 
-    const bodySchema = op.requestBody?.content?.['application/json']?.schema
-    const bodyProps = (bodySchema?.properties ?? {}) as Record<string, Record<string, unknown>>
-    const bodyRequired = new Set((bodySchema?.required as string[]) ?? [])
+    // OpenAPI request bodies can be any JSON type — object, array, or
+    // primitive. We flatten object properties into individual `--<prop>`
+    // options for ergonomics, but non-object bodies (array request bodies
+    // are common for bulk endpoints) used to be silently dropped:
+    // `bodySchema.properties` was undefined, `bodyKeys` was empty, and the
+    // handler skipped the body entirely. We now always expose a `--body`
+    // JSON escape hatch whenever a request body exists, and the handler
+    // prefers it when set. Swagger 2 carries the body in an `in: body`
+    // parameter rather than `requestBody`.
+    const bodySchema =
+      op.requestBody?.content?.['application/json']?.schema ?? swagger2BodyParam?.schema
+    const bodyIsObject =
+      !!bodySchema && typeof bodySchema === 'object' && (bodySchema as any).type === 'object'
+    const bodyProps = bodyIsObject
+      ? (((bodySchema as any).properties ?? {}) as Record<string, Record<string, unknown>>)
+      : ({} as Record<string, Record<string, unknown>>)
+    const bodyRequired = bodyIsObject
+      ? new Set(((bodySchema as any).required as string[] | undefined) ?? [])
+      : new Set<string>()
+    const hasBodySchema = !!bodySchema
+    // Requiredness for top-level non-object bodies (arrays, primitives).
+    // OpenAPI 3 uses `requestBody.required`; Swagger 2 uses the body
+    // parameter's own `required` field. Both need to be honored, otherwise
+    // a Swagger 2 endpoint with `in: body, required: true, schema: { type:
+    // 'array' }` would accept empty options and call the server without any
+    // payload.
+    const bodyRequiredTopLevel =
+      op.requestBody?.required === true || swagger2BodyParam?.required === true
+    const responseSchema = getResponseSchema(op.responses)
 
     // Build args Zod schema from path params
     let argsSchema: z.ZodObject<any> | undefined
@@ -413,10 +453,18 @@ export async function generateCommands(
       optShape[p.name] = coerceIfNeeded(zodType)
       usedOptionNames.add(p.name)
     }
+    // Flattened body properties are ALWAYS optional at schema time, even
+    // when the OpenAPI spec marks them required. Parser validation runs
+    // before `resolveCommandOptions`, which is where the `--json`
+    // full-payload flag's fields get merged into `options` — marking a
+    // per-prop flag required at schema time would reject
+    // `--json '{"name":"Bob"}'` with a spurious "name is missing" error
+    // because the flattened `name` option isn't populated yet. The
+    // `bodyRequired` set is still passed into the handler, which enforces
+    // requiredness AFTER the merge sees all three input channels (--body,
+    // --json, flattened --<prop> flags).
     for (const [key, schema] of Object.entries(bodyProps)) {
-      let zodType = toZod(schema)
-      if (!bodyRequired.has(key)) zodType = zodType.optional()
-      optShape[key] = zodType
+      optShape[key] = toZod(schema).optional()
       usedOptionNames.add(key)
     }
     for (const p of headerParams) {
@@ -428,12 +476,60 @@ export async function generateCommands(
       optShape[optionName] = coerceIfNeeded(zodType)
       usedOptionNames.add(optionName)
     }
+    // Raw `--body` escape hatch for non-object bodies (arrays, primitives)
+    // and for object bodies where the caller wants to send extra fields not
+    // enumerated by the schema. Expressed as a JSON string so it round-trips
+    // cleanly via argv. Always OPTIONAL in the schema even when the body is
+    // required — the handler enforces requiredness after the `--json` merge.
+    if (hasBodySchema) {
+      optShape.body = z
+        .string()
+        .optional()
+        .describe('Raw JSON request body. Overrides any flattened --<prop> options.')
+    }
     const optionsSchema = Object.keys(optShape).length > 0 ? z.object(optShape) : undefined
+
+    // The full request body schema (object, array, or primitive) is exposed
+    // on `command.body` so the framework injects a `--json` payload option.
+    // For non-object bodies, `resolveCommandOptions()` routes the parsed JSON
+    // to `options.body` rather than spreading, and the handler picks it up.
+    const bodyZod = bodySchema && typeof bodySchema === 'object' ? toZod(bodySchema) : undefined
+    const outputSchema =
+      responseSchema && typeof responseSchema === 'object' ? toZod(responseSchema) : undefined
+    const operationName = op.operationId ?? `${method}_${path.replace(/[/{}]/g, '_')}`
 
     setCommand(commands, segments, {
       description: op.summary ?? op.description,
       args: argsSchema,
+      body: bodyZod,
+      destructive: httpMethod === 'DELETE',
+      mutates: !['GET', 'HEAD'].includes(httpMethod),
+      openapi: {
+        description: op.description ?? op.summary,
+        httpMethod,
+        operationId: op.operationId,
+        parameters: {
+          ...(pathParams.length > 0
+            ? {
+                path: Object.fromEntries(
+                  pathParams.map((param) => [param.name, param.schema ?? { type: 'string' }]),
+                ),
+              }
+            : undefined),
+          ...(queryParams.length > 0
+            ? {
+                query: Object.fromEntries(
+                  queryParams.map((param) => [param.name, param.schema ?? { type: 'string' }]),
+                ),
+              }
+            : undefined),
+        },
+        path,
+        ...(bodySchema ? { requestBody: bodySchema } : undefined),
+        ...(responseSchema ? { response: responseSchema } : undefined),
+      },
       options: optionsSchema,
+      output: outputSchema,
       run: createHandler({
         basePath: options.basePath,
         fetch,
@@ -443,6 +539,9 @@ export async function generateCommands(
         pathParams,
         queryParams,
         bodyProps,
+        bodyRequiredProps: [...bodyRequired],
+        bodyRequired: bodyRequiredTopLevel,
+        operationId: operationName,
       }),
     })
   }
@@ -677,9 +776,19 @@ function getGroup(commands: Map<string, GeneratedEntry>, segment: CommandSegment
 function createHandler(config: {
   basePath?: string | undefined
   bodyProps: Record<string, Record<string, unknown>>
+  /** True when the OpenAPI spec declares the request body as required. */
+  bodyRequired: boolean
+  /**
+   * Names of body properties that the OpenAPI spec marks as required.
+   * Enforced in the handler after body assembly, because the per-prop
+   * flags are kept optional at schema time so the `--json` full-payload
+   * route (which merges after Parser validation) can populate them.
+   */
+  bodyRequiredProps: string[]
   fetch: FetchHandler
   headerParams: HeaderParameter[]
   httpMethod: string
+  operationId: string
   path: string
   pathParams: Parameter[]
   queryParams: Parameter[]
@@ -701,13 +810,58 @@ function createHandler(config: {
       if (value !== undefined) query.set(p.name, String(value))
     }
 
-    // Build body from body properties
+    // Build request body. The raw `--body` escape hatch wins when set —
+    // it's the only way to submit non-object bodies (arrays, primitives)
+    // and also lets the caller include fields that were not enumerated
+    // in the schema's flattened properties. Otherwise fall back to the
+    // per-property convenience options.
     let body: string | undefined
-    const bodyKeys = Object.keys(config.bodyProps)
-    if (bodyKeys.length > 0) {
-      const bodyObj: Record<string, unknown> = {}
-      for (const key of bodyKeys) if (options[key] !== undefined) bodyObj[key] = options[key]
-      if (Object.keys(bodyObj).length > 0) body = JSON.stringify(bodyObj)
+    if (typeof options.body === 'string' && options.body.length > 0) {
+      body = options.body
+    } else {
+      const bodyKeys = Object.keys(config.bodyProps)
+      if (bodyKeys.length > 0) {
+        const bodyObj: Record<string, unknown> = {}
+        for (const key of bodyKeys) if (options[key] !== undefined) bodyObj[key] = options[key]
+        if (Object.keys(bodyObj).length > 0) body = JSON.stringify(bodyObj)
+      }
+    }
+
+    // Enforce requiredness AFTER merging `--body` / `--json` / flattened
+    // props. The schema keeps the per-prop flags and the raw `--body`
+    // flag optional at Parser time so the `--json` full-payload route
+    // can populate them via `resolveCommandOptions` (which runs after
+    // Parser validation). This is the single post-merge gate that
+    // covers all three input channels.
+    if (!body && config.bodyRequired)
+      return context.error({
+        code: 'VALIDATION_ERROR',
+        message: `${config.operationId}: request body is required — pass --body <json> or --json <json>`,
+      })
+
+    // For object bodies with declared required properties, check that
+    // the final merged body contains them. This closes the loop for
+    // `--json '{"partial":"yes"}'` and friends: the handler sees the
+    // full merged payload and can name the missing fields precisely.
+    if (body && config.bodyRequiredProps.length > 0) {
+      let parsedBody: unknown
+      try {
+        parsedBody = JSON.parse(body)
+      } catch (err) {
+        return context.error({
+          code: 'VALIDATION_ERROR',
+          message: `${config.operationId}: request body is not valid JSON — ${err instanceof Error ? err.message : String(err)}`,
+        })
+      }
+      if (parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)) {
+        const record = parsedBody as Record<string, unknown>
+        const missing = config.bodyRequiredProps.filter((k) => record[k] === undefined)
+        if (missing.length > 0)
+          return context.error({
+            code: 'VALIDATION_ERROR',
+            message: `${config.operationId}: missing required body fields: ${missing.join(', ')}`,
+          })
+      }
     }
 
     const input: Fetch.FetchInput = {
@@ -743,6 +897,22 @@ function createHandler(config: {
 
     return output.data
   }
+}
+
+function getResponseSchema(
+  responses: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!responses) return undefined
+  const preferred =
+    Object.entries(responses).find(([status]) => /^2\d\d$/.test(status)) ??
+    Object.entries(responses).find(([status]) => status === 'default')
+  const response = preferred?.[1] as
+    | {
+        content?: Record<string, { schema?: Record<string, unknown> | undefined }> | undefined
+        schema?: Record<string, unknown> | undefined
+      }
+    | undefined
+  return response?.content?.['application/json']?.schema ?? response?.schema
 }
 
 /** Converts a JSON Schema object to a Zod schema. */
