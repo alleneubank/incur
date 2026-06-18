@@ -48,6 +48,54 @@ describe('parse', () => {
     expect(result.options).toEqual({ verbose: false })
   })
 
+  test('--no-<x> still negates a registered <x> boolean field', () => {
+    const result = Parser.parse(['--no-connect'], {
+      options: z.object({ connect: z.boolean().optional() }),
+    })
+    expect(result.options).toEqual({ connect: false })
+  })
+
+  test('--no-<x> sets a literal noX boolean field to true when <x> is not registered', () => {
+    const result = Parser.parse(['--no-connect'], {
+      options: z.object({ noConnect: z.boolean().optional() }),
+    })
+    expect(result.options).toEqual({ noConnect: true })
+  })
+
+  test('--noConnect camelCase still sets a literal noX boolean field to true', () => {
+    const result = Parser.parse(['--noConnect'], {
+      options: z.object({ noConnect: z.boolean().optional() }),
+    })
+    expect(result.options).toEqual({ noConnect: true })
+  })
+
+  test('throws ParseError for --no-<x> when neither <x> nor noX is registered', () => {
+    expect(() =>
+      Parser.parse(['--no-unknown'], {
+        options: z.object({ other: z.boolean().optional() }),
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        name: 'Incur.ParseError',
+        message: 'Unknown flag: --no-unknown',
+      }),
+    )
+  })
+
+  // When both connect and noConnect fields exist, negation of the base
+  // field wins. Users who want the literal noX path should rename or
+  // remove the conflicting base field; we preserve the long-standing
+  // negation shortcut over the literal fallback for backwards compat.
+  test('negation shortcut takes precedence over literal noX fallback when both exist', () => {
+    const result = Parser.parse(['--no-connect'], {
+      options: z.object({
+        connect: z.boolean().optional(),
+        noConnect: z.boolean().optional(),
+      }),
+    })
+    expect(result.options).toEqual({ connect: false })
+  })
+
   test('parses repeated flags as array', () => {
     const result = Parser.parse(['--label', 'bug', '--label', 'feature'], {
       options: z.object({ label: z.array(z.string()) }),

@@ -2,6 +2,7 @@ import type { z } from 'zod'
 
 import type { FieldError } from './Errors.js'
 import { ParseError, ValidationError } from './Errors.js'
+import { allowsControlChars, hasControlChars } from './hardened.js'
 import { isRecord, toKebab } from './internal/helpers.js'
 
 /** Parses raw argv tokens against Zod schemas for args and options. */
@@ -22,10 +23,20 @@ export function parse<
     const token = argv[i]!
 
     if (token.startsWith('--no-') && token.length > 5) {
-      // --no-flag negation
-      const name = normalizeOptionName(token.slice(5), optionNames)
-      if (!name) throw new ParseError({ message: `Unknown flag: ${token}` })
-      rawArgvOptions[name] = false
+      // --no-<x>: prefer negating a registered <x> boolean (long-standing
+      // shortcut), but fall back to treating the flag as a literal
+      // `no<X>` field when no base <x> is registered. This lets schemas
+      // declare fields like `noConnect: z.boolean()` and have `--no-connect`
+      // set them to true, matching how `--help` already renders them.
+      const rest = token.slice(5)
+      const negationTarget = normalizeOptionName(rest, optionNames)
+      if (negationTarget) {
+        rawArgvOptions[negationTarget] = false
+      } else {
+        const literalTarget = normalizeOptionName(`no-${rest}`, optionNames)
+        if (!literalTarget) throw new ParseError({ message: `Unknown flag: ${token}` })
+        rawArgvOptions[literalTarget] = true
+      }
       i++
     } else if (token.startsWith('--')) {
       const eqIdx = token.indexOf('=')
@@ -259,8 +270,17 @@ function setOption(
 /** Wraps zod schema.parse(), converting ZodError to ValidationError. */
 function zodParse(schema: z.ZodObject<any>, data: Record<string, unknown>) {
   try {
-    return schema.parse(data)
+    const parsed = schema.parse(data)
+    const fieldErrors = validateParsedStrings(schema, parsed)
+    if (fieldErrors.length > 0) {
+      throw new ValidationError({
+        message: fieldErrors.map((issue) => issue.message).join('; '),
+        fieldErrors,
+      })
+    }
+    return parsed
   } catch (err: any) {
+    if (err instanceof ValidationError) throw err
     const issues: any[] = err?.issues ?? err?.error?.issues ?? []
     const fieldErrors: FieldError[] = issues.map((issue: any) => ({
       code: issue.code,
@@ -314,6 +334,78 @@ function coerceEnv(value: string, field: z.ZodType): unknown {
   return value
 }
 
+function validateParsedStrings(
+  schema: z.ZodType,
+  value: unknown,
+  path: string[] = [],
+): FieldError[] {
+  const def = (schema as any)?._zod?.def
+  const type = def?.type
+
+  if (value === undefined || value === null || !type) return []
+
+  if (type === 'default' || type === 'optional' || type === 'nullable' || type === 'catch')
+    return validateParsedStrings(def.innerType as z.ZodType, value, path)
+
+  if (type === 'string') {
+    if (typeof value !== 'string' || allowsControlChars(schema) || !hasControlChars(value))
+      return []
+    return [
+      {
+        path: path.join('.'),
+        expected: 'safe-string',
+        received: 'string-with-control-chars',
+        message: 'Control characters are not allowed',
+      },
+    ]
+  }
+
+  if (type === 'object') {
+    if (typeof value !== 'object' || value === null) return []
+    return Object.entries(def.shape as Record<string, z.ZodType>).flatMap(([key, child]) =>
+      validateParsedStrings(child, (value as Record<string, unknown>)[key], [...path, key]),
+    )
+  }
+
+  if (type === 'array') {
+    if (!Array.isArray(value)) return []
+    return value.flatMap((item, index) =>
+      validateParsedStrings(def.element as z.ZodType, item, [...path, String(index)]),
+    )
+  }
+
+  if (type === 'union') {
+    const match = (def.options as z.ZodType[]).find((option) => option.safeParse(value).success)
+    return match ? validateParsedStrings(match, value, path) : []
+  }
+
+  if (type === 'record') {
+    if (typeof value !== 'object' || value === null) return []
+    const valType = def.valueType as z.ZodType | undefined
+    if (!valType) return []
+    return Object.entries(value as Record<string, unknown>).flatMap(([key, child]) =>
+      validateParsedStrings(valType, child, [...path, key]),
+    )
+  }
+
+  if (type === 'tuple') {
+    if (!Array.isArray(value)) return []
+    const items = (def.items as z.ZodType[]) ?? []
+    return items.flatMap((item, index) =>
+      validateParsedStrings(item, value[index], [...path, String(index)]),
+    )
+  }
+
+  if (type === 'intersection') {
+    return [
+      ...validateParsedStrings(def.left as z.ZodType, value, path),
+      ...validateParsedStrings(def.right as z.ZodType, value, path),
+    ]
+  }
+
+  return []
+}
+
 /** Coerces a raw string value to the type expected by the schema. */
 function coerce(value: unknown, name: string, schema: z.ZodObject<any>): unknown {
   const field = schema.shape[name]
@@ -327,6 +419,23 @@ function coerce(value: unknown, name: string, schema: z.ZodObject<any>): unknown
   if (typeName === 'ZodBoolean' && typeof value === 'string') {
     return value === 'true'
   }
+  return value
+}
+
+/**
+ * Coerces a single query-param string value using CLI-style rules:
+ * - `"true"` / `"false"` → boolean
+ * - numeric strings → number
+ * - everything else → string as-is
+ *
+ * This mirrors how CLI argv coerces option values so GET requests behave
+ * consistently with CLI invocations without requiring `z.coerce.*` in schemas.
+ */
+export function coerceQueryParam(value: string): unknown {
+  if (value === 'true') return true
+  if (value === 'false') return false
+  const n = Number(value)
+  if (value !== '' && !Number.isNaN(n)) return n
   return value
 }
 
