@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { stringify as yamlStringify } from 'yaml'
 import type { z } from 'zod'
 
+import { toKebab } from './internal/helpers.js'
 import * as Schema from './Schema.js'
 
 /** Information about a single command, passed to `generate()`. */
@@ -85,6 +86,27 @@ export function generate(
   }
 
   return sections.join('\n\n')
+}
+
+/** Generates a CLI-level context file from rules and command names. */
+export function generateContext(
+  name: string,
+  commands: CommandInfo[],
+  rules: string[] = [],
+): string {
+  const lines = [`# ${name} Context`, '']
+
+  if (rules.length > 0) {
+    lines.push('## Rules')
+    lines.push('')
+    for (const rule of rules) lines.push(`- ${rule}`)
+    lines.push('')
+  }
+
+  lines.push('## Commands')
+  lines.push('')
+  for (const command of commands) lines.push(`- ${command.name}`)
+  return lines.join('\n')
 }
 
 /** Splits commands into skill files grouped by depth. */
@@ -207,7 +229,7 @@ function renderCommandBody(cli: string, cmd: CommandInfo, level = 1): string {
       const def = prop?.default !== undefined ? String(prop.default) : ''
       const rawDesc = field.description ?? ''
       const desc = prop?.deprecated ? `**Deprecated.** ${rawDesc}` : rawDesc
-      return `| \`--${key}\` | \`${type}\` | ${def ? `\`${def}\`` : ''} | ${desc} |`
+      return `| \`--${toKebab(key)}\` | \`${type}\` | ${def ? `\`${def}\`` : ''} | ${desc} |`
     })
     sections.push(
       `${sub} Options\n\n| Flag | Type | Default | Description |\n|------|------|---------|-------------|\n${rows.join('\n')}`,
@@ -240,8 +262,43 @@ function renderCommandBody(cli: string, cmd: CommandInfo, level = 1): string {
   return sections.join('\n\n')
 }
 
-/** Computes a deterministic hash of command structure for staleness detection. */
-export function hash(commands: CommandInfo[]): string {
+/**
+ * Returns the set of slugified skill directory names that `split(name,
+ * commands, depth)` would emit. Mirrors `renderGroup`'s slug algorithm
+ * without doing the full render. Used by `SyncSkills` and `Cli.serve` to
+ * filter `sync.skills` inline entries against the command-derived shadow set
+ * before hashing — keeps both the write side and the staleness-check read
+ * side in agreement on the hash without either site doing a filesystem walk
+ * to expand `include` globs.
+ */
+export function generatedNames(name: string, commands: CommandInfo[], depth: number): Set<string> {
+  const out = new Set<string>()
+  if (depth === 0) {
+    out.add(slugify(name))
+    return out
+  }
+  for (const cmd of commands) {
+    if (!cmd.name) continue
+    const segments = cmd.name.split(' ')
+    const prefix = segments.slice(0, depth).join(' ')
+    out.add(slugify(`${name} ${prefix}`))
+  }
+  return out
+}
+
+/**
+ * Computes a deterministic hash of command structure for staleness detection.
+ *
+ * The optional `extras` argument folds in build-time-baked SKILL.md bodies
+ * (see `SyncSkills.sync` `skills?` option), so a compiled binary that ships
+ * updated inline skill content but unchanged commands still trips the
+ * out-of-date check inside `Cli.serve`. Sorted by name to keep the hash
+ * order-stable across calls.
+ */
+export function hash(
+  commands: CommandInfo[],
+  extras?: ReadonlyArray<{ name: string; content: string }> | undefined,
+): string {
   const data = commands.map((cmd) => ({
     name: cmd.name,
     description: cmd.description,
@@ -250,7 +307,15 @@ export function hash(commands: CommandInfo[]): string {
     options: cmd.options ? Schema.toJsonSchema(cmd.options) : undefined,
     output: cmd.output ? Schema.toJsonSchema(cmd.output) : undefined,
   }))
-  return createHash('sha256').update(JSON.stringify(data)).digest('hex').slice(0, 16)
+  const extrasData = extras?.length
+    ? [...extras]
+        .map((s) => ({ name: s.name, content: s.content }))
+        .sort((a, b) => a.name.localeCompare(b.name))
+    : undefined
+  return createHash('sha256')
+    .update(JSON.stringify(extrasData ? { commands: data, extras: extrasData } : data))
+    .digest('hex')
+    .slice(0, 16)
 }
 
 /** @internal Renders a JSON Schema object as a Markdown table. Returns `undefined` for non-object schemas. */
