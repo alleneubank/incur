@@ -1,4 +1,4 @@
-import { Cli, z } from 'incur'
+import { Cli, z } from '@0xbigboss/incur'
 
 const cli = Cli.create('npm', {
   version: '10.9.2',
