@@ -55,6 +55,21 @@ test('includes options table', () => {
   `)
 })
 
+test('renders option flags in kebab-case', () => {
+  const result = Skill.generate('test', [
+    {
+      name: 'connect',
+      description: 'Connect to a service',
+      options: z.object({
+        noConnect: z.boolean().optional().describe('Skip the connection'),
+      }),
+    },
+  ])
+
+  expect(result).toContain('`--no-connect`')
+  expect(result).not.toContain('`--noConnect`')
+})
+
 test('prepends **Deprecated.** to deprecated option descriptions', () => {
   const result = Skill.generate('test', [
     {
