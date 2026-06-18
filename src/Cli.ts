@@ -7,6 +7,7 @@ import { estimateTokenCount, sliceByTokens } from 'tokenx'
 import { z } from 'zod'
 
 import * as Binary from './Binary.js'
+import { getEffectiveOptionsSchema as getCommandOptionsSchema } from './CommandOptions.js'
 import * as Completions from './Completions.js'
 import type { FieldError } from './Errors.js'
 import { IncurError, ParseError, ValidationError } from './Errors.js'
@@ -35,6 +36,8 @@ import * as Mcp from './Mcp.js'
 import * as McpSource from './McpSource.js'
 import type { Context as MiddlewareContext, Handler as MiddlewareHandler } from './middleware.js'
 import * as Openapi from './Openapi.js'
+import type { Plugin } from './Plugin.js'
+import * as Sanitize from './Sanitize.js'
 export type { MiddlewareHandler }
 import * as Parser from './Parser.js'
 import type { Register } from './Register.js'
@@ -134,6 +137,8 @@ export type Cli<
   fs(directory?: URL | undefined): Cli<commands & Commands, vars, env, globals, cliName>
   /** Parses argv, runs the matched command, and writes the output envelope to stdout. */
   serve(argv?: string[], options?: serve.Options): Promise<void>
+  /** Mounts a generated plugin as a command group with async loading. */
+  plugin<const name extends string>(name: name, plugin: Plugin<any, any>): Cli<commands, vars, env>
   /** Registers middleware that runs around every command. */
   use(handler: MiddlewareHandler<vars, env, globals>): Cli<commands, vars, env, globals, cliName>
   /** The vars schema, if declared. Use `typeof cli.vars` with `middleware<vars, env>()` for typed middleware. */
@@ -312,7 +317,10 @@ export function create(
         const generated = await Openapi.generateCommands(spec, rootFetch, {
           config: def.openapiConfig,
         })
-        for (const [name, command] of generated) commands.set(name, command)
+        // Generated commands carry richer fields (output/body/openapi) than the
+        // base CommandDefinition<any,any,any> variant in CommandEntry; the cast
+        // matches the group-mount path below.
+        for (const [name, command] of generated) commands.set(name, command as CommandEntry)
       })(),
     )
   }
@@ -418,7 +426,23 @@ export function create(
     },
 
     async fetch(req: Request) {
-      if (pending.length > 0) await Promise.all(pending)
+      if (pending.length > 0) {
+        try {
+          await Promise.all(pending)
+        } catch (err) {
+          const code = err instanceof IncurError ? err.code : 'PLUGIN_RESOLUTION_FAILED'
+          const message =
+            err instanceof IncurError
+              ? err.shortMessage
+              : err instanceof Error
+                ? err.message
+                : String(err)
+          return new Response(JSON.stringify({ ok: false, error: { code, message } }), {
+            status: 500,
+            headers: { 'content-type': 'application/json' },
+          })
+        }
+      }
       const globalsDesc = toGlobals.get(cli)
       return fetchImpl(name, commands, req, {
         description: def.description,
@@ -428,6 +452,7 @@ export function create(
         middlewares,
         name,
         rootCommand: rootDef,
+        sanitize: def.sanitize,
         vars: def.vars,
         version,
       })
@@ -454,7 +479,29 @@ export function create(
 
     async serve(argv = process.argv.slice(2), serveOptions: serve.Options = {}) {
       if (await Binary.handleArgv(argv)) return
-      if (pending.length > 0) await Promise.all(pending)
+      if (pending.length > 0) {
+        try {
+          await Promise.all(pending)
+        } catch (err) {
+          // Surface plugin resolution failures as structured errors before serving.
+          const code = err instanceof IncurError ? err.code : 'PLUGIN_RESOLUTION_FAILED'
+          // Use shortMessage to avoid the "Details: ..." suffix that BaseError appends.
+          const message =
+            err instanceof IncurError
+              ? err.shortMessage
+              : err instanceof Error
+                ? err.message
+                : String(err)
+          const stderrFn = serveOptions.stderr ?? ((s: string) => process.stderr.write(s))
+          const exit = serveOptions.exit ?? ((code: number) => process.exit(code))
+          const { format: formatFlag, formatExplicit } = extractBuiltinFlags(argv)
+          const format = formatExplicit ? formatFlag : 'toon'
+          const output = Formatter.format({ code, message }, format)
+          stderrFn(output.endsWith('\n') ? output : `${output}\n`)
+          exit(1)
+          return
+        }
+      }
       const globalsDesc = toGlobals.get(cli)
       return serveImpl(name, commands, argv, {
         ...serveOptions,
@@ -471,11 +518,53 @@ export function create(
         package: def.package,
         rootCommand: rootDef,
         rootFetch,
+        sanitize: def.sanitize,
         sync: def.sync,
         update: def.update,
         vars: def.vars,
         version,
       })
+    },
+
+    plugin(pluginName: string, plugin: Plugin): any {
+      pending.push(
+        (async () => {
+          let sub: Cli
+          try {
+            const config = plugin.config
+              ? (plugin.config as z.ZodObject<any>).parse(plugin.options ?? {})
+              : undefined
+            const resolved = await plugin.resolve({
+              cwd: process.cwd(),
+              config,
+              mount: pluginName,
+            } as any)
+            sub = resolved as Cli
+          } catch (err) {
+            // Use the direct message, not the full chain with "Details: ..." appended by BaseError
+            const message = err instanceof Error ? err.message : String(err)
+            // Strip "Details: ..." suffix that BaseError appends to the full message
+            const shortMessage = (err as any).shortMessage ?? message.split('\n\nDetails:')[0]!
+            throw new IncurError({
+              code: 'PLUGIN_RESOLUTION_FAILED',
+              message: `Failed to resolve plugin '${pluginName}': ${shortMessage}`,
+              cause: err instanceof Error ? err : undefined,
+            })
+          }
+          // Await any pending promises generated by the sub-CLI (e.g. generated command subtrees)
+          const subPending = toPending.get(sub)
+          if (subPending && subPending.length > 0) await Promise.all(subPending)
+          const subCommands = toCommands.get(sub)!
+          const subMiddlewares = toMiddlewares.get(sub)
+          commands.set(pluginName, {
+            _group: true,
+            description: plugin.description ?? sub.description,
+            commands: subCommands,
+            ...(subMiddlewares?.length ? { middlewares: subMiddlewares } : undefined),
+          })
+        })(),
+      )
+      return cli
     },
 
     use(handler: MiddlewareHandler): any {
@@ -635,6 +724,8 @@ export declare namespace create {
           args: InferOutput<args>
           /** The binary name the user invoked (e.g. an alias). Falls back to `name` when not resolvable. */
           displayName: string
+          /** Whether this is a dry-run invocation. */
+          dryRun: boolean
           /** Parsed environment variables. */
           env: InferOutput<env>
           /** Return an error result with optional CTAs. */
@@ -684,18 +775,42 @@ export declare namespace create {
       | undefined
     /** Trusted npm package for generated commands when it differs from the CLI name. */
     package?: string | undefined
+    /** Sanitizes output before it is returned to agents. */
+    sanitize?:
+      | ((
+          output: unknown,
+          context: { command: string; agent: boolean },
+        ) => Promise<{
+          output: unknown
+          blocked: boolean
+          warnings?: string[] | undefined
+        }>)
+      | undefined
     /** Options for the built-in `skills add` command. Pass `false` to disable generated skills. */
     sync?:
       | false
       | {
           /** Text printed verbatim after the synced skills, before the suggestions. For whatever installing skills cannot do itself, such as authorizing an app. */
           body?: string | undefined
+          /** Rules to include in generated context file. */
+          contextRules?: string[] | undefined
           /** Working directory for resolving `include` globs. Pass `import.meta.dirname` when running from a bin entry. Defaults to `process.cwd()`. */
           cwd?: string | undefined
           /** Default grouping depth for skill files. Overridden by `--depth`. Defaults to `1`. */
           depth?: number | undefined
           /** Glob patterns for directories containing SKILL.md files to include (e.g. `"skills/*"`, `"my-skill"`). */
           include?: string[] | undefined
+          /**
+           * Inline SKILL.md entries baked in at build time. Use when the CLI
+           * is compiled into a single-file executable and the source tree
+           * that `include` globs against is unreachable at runtime — import
+           * the SKILL.md body as text (e.g. Bun's
+           * `import skill from './SKILL.md' with { type: 'text' }`) and pass
+           * it here. Inline entries yield to same-name skills produced by
+           * the command generator or by `include` so live dev-mode edits
+           * stay authoritative.
+           */
+          skills?: Array<{ name: string; content: string }> | undefined
           /** Example prompts shown after sync to help users get started. */
           suggestions?: string[] | undefined
         }
@@ -754,6 +869,8 @@ export declare namespace serve {
     exit?: ((code: number) => void) | undefined
     /** Override stdout writer. Defaults to `process.stdout.write`. */
     stdout?: ((s: string) => void) | undefined
+    /** Override stderr writer. Defaults to `process.stderr.write`. */
+    stderr?: ((s: string) => void) | undefined
   }
 }
 
@@ -766,6 +883,7 @@ async function serveImpl(
   options: serveImpl.Options = {},
 ) {
   const stdout = options.stdout ?? ((s: string) => process.stdout.write(s))
+  const stderr = options.stderr ?? ((s: string) => process.stderr.write(s))
   const exit = options.exit ?? ((code: number) => process.exit(code))
   const tty = process.stdout.isTTY === true
   let human = tty
@@ -780,6 +898,12 @@ async function serveImpl(
 
   function writeln(s: string) {
     stdout(s.endsWith('\n') ? s : `${s}\n`)
+  }
+
+  // Error output goes to stderr so shell patterns like
+  // `eval "$(cli cmd 2>/dev/null)"` stay safe when a command fails.
+  function writelnErr(s: string) {
+    stderr(s.endsWith('\n') ? s : `${s}\n`)
   }
 
   async function writeBanner() {
@@ -801,8 +925,8 @@ async function serveImpl(
     builtinFlags = extractBuiltinFlags(argv, { configFlag })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    if (human) writeln(formatHumanError({ code: 'UNKNOWN', message }))
-    else writeln(Formatter.format({ code: 'UNKNOWN', message }, 'toon'))
+    if (human) writelnErr(formatHumanError({ code: 'UNKNOWN', message }))
+    else writelnErr(Formatter.format({ code: 'UNKNOWN', message }, 'toon'))
     exit(1)
     return
   }
@@ -822,7 +946,6 @@ async function serveImpl(
     update,
     updateCheck,
     version,
-    schema,
     configPath,
     configDisabled,
     rest,
@@ -892,17 +1015,36 @@ async function serveImpl(
     return
   }
 
+  // Allow `schema <command...>` as a positional built-in in addition to the `--schema` flag.
+  // The positional form produces a richer output: `{ name, schema: { ... } }`.
+  // Runs after global parsing so `filtered` no longer carries global flags.
+  let schema = builtinFlags.schema
+  let schemaPositional = false
+  if (!schema && filtered[0] === 'schema') {
+    schema = true
+    schemaPositional = true
+    filtered = filtered.slice(1)
+  }
+
   // --mcp: start as MCP stdio server
   if (mcpFlag) {
-    await Mcp.serve(options.mcp?.name ?? name, options.version ?? '0.0.0', commands, {
-      middlewares: options.middlewares,
-      env: options.envSchema,
-      vars: options.vars,
-      version: options.version,
-      ...(options.mcp?.instructions ? { instructions: options.mcp.instructions } : undefined),
-      ...(options.mcp?.title ? { title: options.mcp.title } : undefined),
-      ...(options.mcp?.tools ? { tools: options.mcp.tools } : undefined),
-    })
+    try {
+      await Mcp.serve(options.mcp?.name ?? name, options.version ?? '0.0.0', commands, {
+        middlewares: options.middlewares,
+        env: options.envSchema,
+        vars: options.vars,
+        version: options.version,
+        sanitize: options.sanitize,
+        ...(options.mcp?.instructions ? { instructions: options.mcp.instructions } : undefined),
+        ...(options.mcp?.title ? { title: options.mcp.title } : undefined),
+        ...(options.mcp?.tools ? { tools: options.mcp.tools } : undefined),
+      })
+    } catch (err) {
+      const code = err instanceof IncurError ? err.code : 'UNKNOWN'
+      const message = err instanceof Error ? err.message : String(err)
+      writelnErr(Formatter.format({ code, message }, formatExplicit ? formatFlag : 'toon'))
+      exit(1)
+    }
     return
   }
 
@@ -973,7 +1115,37 @@ async function serveImpl(
       if (stored && SyncSkills.hasInstalledSkills(name, { cwd: sync?.cwd })) {
         const groups = new Map<string, string>()
         const entries = collectSkillCommands(commands, [], groups, options.rootCommand)
-        if (Skill.hash(entries) !== stored) {
+        // Filter inline `sync.skills` against the same shadow set the write
+        // site in `SyncSkills.sync()` uses: command-derived skill names ∪
+        // include glob skill names. The include walk is async I/O on every
+        // CLI invocation that has a non-empty `include`; for shipped
+        // binaries `include` is typically empty (no source tree at runtime)
+        // so the helper is a no-op. We only invoke it when there's at least
+        // one inline entry that could possibly be shadowed.
+        const depth = options.sync?.depth ?? 1
+        const generatedNames = Skill.generatedNames(name, entries, depth)
+        let inlineForHash = options.sync?.skills as
+          | ReadonlyArray<{ name: string; content: string }>
+          | undefined
+        if (inlineForHash?.length) {
+          // Prefer the cwd that was persisted at the last sync — the write
+          // side could have anchored to `process.cwd()` (for `skills add
+          // --no-global`) or `resolvePackageRoot()` (default global mode),
+          // and the read side has no other way to tell which mode the user
+          // picked. Fall back to the default resolver if no metadata exists
+          // (first run, or hash file cleared).
+          const cwd =
+            SyncSkills.readIncludeCwd(name) ??
+            SyncSkills.resolveIncludeCwd({ cwd: options.sync?.cwd })
+          const includeShadowed = await SyncSkills.expandIncludeNames(
+            name,
+            options.sync?.include,
+            cwd,
+          )
+          const shadowed = new Set<string>([...generatedNames, ...includeShadowed])
+          inlineForHash = inlineForHash.filter((s) => !shadowed.has(s.name))
+        }
+        if (Skill.hash(entries, inlineForHash) !== stored) {
           const command =
             process.env.npm_config_user_agent || process.env.npm_execpath
               ? `${detectRunner()} ${SyncMcp.detectPackageSpecifier(
@@ -1110,9 +1282,9 @@ async function serveImpl(
         commands: ctaCommands,
       }
       if (human) {
-        writeln(formatHumanError({ code: 'COMMAND_NOT_FOUND', message }))
-        writeln(formatHumanCta(cta))
-      } else writeln(Formatter.format({ code: 'COMMAND_NOT_FOUND', message, cta }, 'toon'))
+        writelnErr(formatHumanError({ code: 'COMMAND_NOT_FOUND', message }))
+        writelnErr(formatHumanCta(cta))
+      } else writelnErr(Formatter.format({ code: 'COMMAND_NOT_FOUND', message, cta }, 'toon'))
       exit(1)
       return
     }
@@ -1183,12 +1355,14 @@ async function serveImpl(
     try {
       stdout('Syncing...')
       const result = await SyncSkills.sync(name, commands, {
+        contextRules: sync?.contextRules,
         cwd: sync?.cwd,
         depth,
         description: options.description,
         global,
         include: sync?.include,
         rootCommand: options.rootCommand,
+        skills: options.sync?.skills,
       })
       stdout('\r\x1b[K')
       const lines: string[] = []
@@ -1259,9 +1433,9 @@ async function serveImpl(
         commands: ctaCommands,
       }
       if (human) {
-        writeln(formatHumanError({ code: 'COMMAND_NOT_FOUND', message }))
-        writeln(formatHumanCta(cta))
-      } else writeln(Formatter.format({ code: 'COMMAND_NOT_FOUND', message, cta }, 'toon'))
+        writelnErr(formatHumanError({ code: 'COMMAND_NOT_FOUND', message }))
+        writelnErr(formatHumanCta(cta))
+      } else writelnErr(Formatter.format({ code: 'COMMAND_NOT_FOUND', message, cta }, 'toon'))
       exit(1)
       return
     }
@@ -1523,24 +1697,43 @@ async function serveImpl(
       const parent = resolved.path ? `${name} ${resolved.path}` : name
       const suggestion = suggest(resolved.error, resolved.commands.keys())
       const didYouMean = suggestion ? ` Did you mean '${suggestion}'?` : ''
-      writeln(`Error: '${resolved.error}' is not a command for '${parent}'.${didYouMean}`)
+      writelnErr(`Error: '${resolved.error}' is not a command for '${parent}'.${didYouMean}`)
       exit(1)
       return
     }
     if ('fetchGateway' in resolved) {
-      writeln('--schema is not supported for fetch commands.')
+      writelnErr('--schema is not supported for fetch commands.')
       exit(1)
       return
     }
     const cmd = resolved.command
     const format = formatExplicit ? formatFlag : 'toon'
-    const result: Record<string, unknown> = {}
-    if (cmd.args) result.args = Schema.toJsonSchema(cmd.args)
-    if (cmd.env) result.env = Schema.toJsonSchema(cmd.env)
-    if (cmd.options) result.options = Schema.toJsonSchema(cmd.options)
-    if (cmd.output) result.output = Schema.toJsonSchema(cmd.output)
-    if (options.globals?.schema) result.globals = Schema.toJsonSchema(options.globals.schema)
-    writeln(Formatter.format(result, format))
+    const effectiveOpts = getCommandOptionsSchema(cmd)
+    if (schemaPositional) {
+      // Positional `schema <command>` returns enriched format: { name, schema: { ... } }
+      const schemaResult: Record<string, unknown> = {
+        name: resolved.path,
+        schema: {} as Record<string, unknown>,
+      }
+      const s = schemaResult.schema as Record<string, unknown>
+      if (cmd.args) s.args = Schema.toJsonSchema(cmd.args)
+      if (cmd.env) s.env = Schema.toJsonSchema(cmd.env)
+      if (cmd.body) s.body = Schema.toJsonSchema(cmd.body)
+      if (cmd.input) s.input = Schema.toJsonSchema(cmd.input)
+      if (effectiveOpts) s.options = Schema.toJsonSchema(effectiveOpts)
+      if (cmd.output) s.output = Schema.toJsonSchema(cmd.output)
+      if (options.globals?.schema) s.globals = Schema.toJsonSchema(options.globals.schema)
+      writeln(Formatter.format(schemaResult, format))
+    } else {
+      // Legacy `--schema` flag returns flat format: { args, env, options, output }
+      const result: Record<string, unknown> = {}
+      if (cmd.args) result.args = Schema.toJsonSchema(cmd.args)
+      if (cmd.env) result.env = Schema.toJsonSchema(cmd.env)
+      if (effectiveOpts) result.options = Schema.toJsonSchema(effectiveOpts)
+      if (cmd.output) result.output = Schema.toJsonSchema(cmd.output)
+      if (options.globals?.schema) result.globals = Schema.toJsonSchema(options.globals.schema)
+      writeln(Formatter.format(result, format))
+    }
     return
   }
 
@@ -1611,6 +1804,8 @@ async function serveImpl(
   const renderOutput = !(human && !formatExplicit && effectiveOutputPolicy === 'agent-only')
 
   const filterPaths = filterOutput ? Filter.parse(filterOutput) : undefined
+  // Set by the command resolution path to enable --fields validation warnings.
+  let commandOutputSchema: Record<string, unknown> | undefined
 
   function truncate(s: string): {
     text: string
@@ -1633,8 +1828,23 @@ async function serveImpl(
   }
 
   function write(output: Output) {
-    if (filterPaths && output.ok && output.data != null)
+    if (filterPaths && output.ok && output.data != null) {
       output = { ...output, data: Filter.apply(output.data, filterPaths) }
+      // Validate filter paths against the output schema and surface unknown-field warnings.
+      if (commandOutputSchema) {
+        const warnings = Filter.validate(filterPaths, commandOutputSchema)
+        if (warnings.length > 0) {
+          const existingWarnings = (output.meta as any).warnings as string[] | undefined
+          output = {
+            ...output,
+            meta: {
+              ...output.meta,
+              warnings: [...(existingWarnings ?? []), ...warnings],
+            },
+          }
+        }
+      }
+    }
     if (noticeCta) {
       const existing = output.meta.cta
       output = {
@@ -1650,18 +1860,20 @@ async function serveImpl(
         },
       }
     }
+    // Route non-ok output through stderr so `eval "$(cli cmd 2>/dev/null)"` stays safe.
+    const writelnOut = output.ok ? writeln : writelnErr
     if (tokenCount) {
       const base = output.ok ? output.data : output.error
       const formatted = base != null ? Formatter.format(base, format) : ''
-      return writeln(String(estimateTokenCount(formatted)))
+      return writelnOut(String(estimateTokenCount(formatted)))
     }
     const cta = output.meta.cta
     if (human && !fullOutput) {
       if (output.ok && output.data != null && renderOutput) {
         const t = truncate(Formatter.format(output.data, format))
         writeln(t.text)
-      } else if (!output.ok) writeln(formatHumanError(output.error))
-      if (cta) writeln(formatHumanCta(cta))
+      } else if (!output.ok) writelnErr(formatHumanError(output.error))
+      if (cta) writelnOut(formatHumanCta(cta))
       return
     }
     if (fullOutput) {
@@ -1681,20 +1893,20 @@ async function serveImpl(
           const meta: Record<string, unknown> = { ...output.meta }
           if (t.nextOffset != null) meta.nextOffset = t.nextOffset
           envelope.meta = meta
-          return writeln(Formatter.format(envelope, format))
+          return writelnOut(Formatter.format(envelope, format))
         }
       }
-      return writeln(Formatter.format(output, format))
+      return writelnOut(Formatter.format(output, format))
     }
     const base = output.ok ? output.data : output.error
     const formatted = Formatter.format(base, format)
     if (!cta) {
-      if (formatted) writeln(truncate(formatted).text)
+      if (formatted) writelnOut(truncate(formatted).text)
       return
     }
     const payload =
       typeof base === 'object' && base !== null ? { ...base, cta } : { data: base, cta }
-    writeln(truncate(Formatter.format(payload, format)).text)
+    writelnOut(truncate(Formatter.format(payload, format)).text)
   }
 
   if ('error' in effective) {
@@ -1716,11 +1928,11 @@ async function serveImpl(
       commands: ctaCommands,
     }
     if (human && !fullOutput) {
-      writeln(formatHumanError({ code: 'COMMAND_NOT_FOUND', message }))
+      writelnErr(formatHumanError({ code: 'COMMAND_NOT_FOUND', message }))
       const mergedCta = noticeCta
         ? { ...cta, commands: [...cta.commands, ...noticeCta.commands] }
         : cta
-      writeln(formatHumanCta(mergedCta))
+      writelnErr(formatHumanCta(mergedCta))
       exit(1)
       return
     }
@@ -1767,6 +1979,7 @@ async function serveImpl(
           truncate,
           write,
           writeln,
+          writelnErr,
           exit,
         })
         return
@@ -1880,6 +2093,10 @@ async function serveImpl(
 
   if (!parseGlobalOptions(true)) return
 
+  // Capture output schema for --fields validation warnings in write()
+  if (filterPaths && command.output)
+    commandOutputSchema = Schema.toJsonSchema(command.output) as Record<string, unknown>
+
   // Collect middleware: root CLI + groups traversed + per-command
   const allMiddleware = [
     ...(options.middlewares ?? []),
@@ -1953,16 +2170,46 @@ async function serveImpl(
       truncate,
       write,
       writeln,
+      writelnErr,
       exit,
     })
     return
   }
 
   if (result.ok) {
+    // Apply output sanitization (prompt-injection scan + custom sanitize hook).
+    // Warnings are merged into the data as `_warnings` so agents see them inline.
+    const sanitized = await Sanitize.sanitize(
+      result.data,
+      { agent: !human, command: path },
+      options.sanitize,
+    )
+    if (sanitized.blocked) {
+      write({
+        ok: false,
+        error: {
+          code: 'SANITIZED_OUTPUT_BLOCKED',
+          message: 'Command output was blocked by sanitization',
+          ...(sanitized.warnings ? ({ warnings: sanitized.warnings } as any) : undefined),
+        },
+        meta: { command: path, duration },
+      })
+      exit(1)
+      return
+    }
+    // Merge warnings into data so they're visible to agents without a wrapper envelope
+    const dataWithWarnings =
+      sanitized.warnings?.length &&
+      sanitized.output !== null &&
+      sanitized.output !== undefined &&
+      typeof sanitized.output === 'object' &&
+      !Array.isArray(sanitized.output)
+        ? { ...(sanitized.output as Record<string, unknown>), _warnings: sanitized.warnings }
+        : sanitized.output
     const cta = formatCtaBlock(displayName, result.cta as CtaBlock | undefined)
     write({
       ok: true,
-      data: result.data,
+      data: dataWithWarnings,
       meta: {
         command: path,
         duration,
@@ -1973,7 +2220,7 @@ async function serveImpl(
     const cta = formatCtaBlock(displayName, result.cta as CtaBlock | undefined)
 
     if (human && !formatExplicit && result.error.fieldErrors) {
-      writeln(
+      writelnErr(
         formatHumanValidationError(
           displayName,
           path,
@@ -2029,6 +2276,7 @@ declare namespace fetchImpl {
             middlewares?: MiddlewareHandler[] | undefined
             env?: z.ZodObject<any> | undefined
             vars?: z.ZodObject<any> | undefined
+            sanitize?: Mcp.SanitizeCallback | undefined
           },
         ) => Promise<Response>)
       | undefined
@@ -2036,6 +2284,13 @@ declare namespace fetchImpl {
     /** CLI name. */
     name?: string | undefined
     rootCommand?: CommandDefinition<any, any, any> | undefined
+    /** Sanitize callback for agent output. */
+    sanitize?:
+      | ((
+          output: unknown,
+          context: { command: string; agent: boolean },
+        ) => Promise<{ output: unknown; blocked: boolean; warnings?: string[] | undefined }>)
+      | undefined
     vars?: z.ZodObject<any> | undefined
     /** CLI version string. */
     version?: string | undefined
@@ -2057,6 +2312,7 @@ function createMcpHttpHandler(
           middlewares?: MiddlewareHandler[] | undefined
           env?: z.ZodObject<any> | undefined
           vars?: z.ZodObject<any> | undefined
+          sanitize?: Mcp.SanitizeCallback | undefined
         }
       | undefined,
     stateless: boolean,
@@ -2074,6 +2330,7 @@ function createMcpHttpHandler(
       middlewares: mcpOptions?.middlewares,
       name,
       request: (extra) => extra?.http?.req,
+      sanitize: mcpOptions?.sanitize,
       sendNotification: (notification) => server.server.notification(notification),
       tools: options.tools,
       vars: mcpOptions?.vars,
@@ -2099,6 +2356,7 @@ function createMcpHttpHandler(
       middlewares?: MiddlewareHandler[] | undefined
       env?: z.ZodObject<any> | undefined
       vars?: z.ZodObject<any> | undefined
+      sanitize?: Mcp.SanitizeCallback | undefined
     },
   ): Promise<Response> => {
     const stateless = options.stateless ?? true
@@ -2214,6 +2472,7 @@ async function fetchImpl(
       middlewares: options.middlewares,
       env: options.envSchema,
       vars: options.vars,
+      sanitize: options.sanitize as Mcp.SanitizeCallback | undefined,
     })
 
   // .well-known/skills/ — Agent Skills Discovery (RFC)
@@ -2262,10 +2521,17 @@ async function fetchImpl(
     return new Response('Not Found', { status: 404 })
   }
 
-  // Parse options from search params (GET) or body (non-GET)
+  // Parse options from search params (GET) or body (non-GET).
+  // For GET: coerce string values using CLI rules (number, boolean) and collect
+  // repeated keys into arrays so `?tag=a&tag=b` becomes `{ tag: ["a", "b"] }`.
   let inputOptions: Record<string, unknown> = {}
-  if (req.method === 'GET') for (const [key, value] of url.searchParams) inputOptions[key] = value
-  else {
+  if (req.method === 'GET') {
+    for (const key of new Set(url.searchParams.keys())) {
+      const values = url.searchParams.getAll(key)
+      const coerced = values.map(Parser.coerceQueryParam)
+      inputOptions[key] = coerced.length === 1 ? coerced[0] : coerced
+    }
+  } else {
     try {
       const contentType = req.headers.get('content-type') ?? ''
       if (contentType.includes('application/json'))
@@ -2327,7 +2593,37 @@ async function fetchImpl(
       404,
     )
 
-  if ('fetchGateway' in resolved) return resolved.fetchGateway.fetch(req)
+  if ('fetchGateway' in resolved) {
+    const { fetchGateway, middlewares: resolvedMiddlewares } = resolved
+    const allMiddleware = [...(options.middlewares ?? []), ...resolvedMiddlewares]
+    if (allMiddleware.length === 0) return fetchGateway.fetch(req)
+    // Run middleware chain around the fetch gateway call so "before/after" hooks apply.
+    let gatewayResponse: Response | undefined
+    const runGateway = async () => {
+      gatewayResponse = await fetchGateway.fetch(req)
+    }
+    const composed = allMiddleware.reduceRight(
+      (next: () => Promise<void>, mw: MiddlewareHandler) => async () => {
+        const mwCtx = {
+          agent: true,
+          command: resolved.path,
+          displayName: resolved.path,
+          env: {},
+          error: (() => undefined) as any,
+          format: 'json' as any,
+          formatExplicit: true,
+          name: options.name ?? name,
+          set: (() => undefined) as any,
+          var: {},
+          version: options.version,
+        }
+        await mw(mwCtx, next)
+      },
+      runGateway,
+    )
+    await composed()
+    return gatewayResponse!
+  }
 
   const { command, path, rest } = resolved
   const groupMiddlewares = 'middlewares' in resolved ? resolved.middlewares : []
@@ -2510,11 +2806,38 @@ async function executeCommand(
     )
   }
 
+  // Apply output sanitization before returning the successful response.
+  const sanitized = await Sanitize.sanitize(
+    result.data,
+    { agent: true, command: path },
+    options.sanitize,
+  )
+  if (sanitized.blocked) {
+    const cta = formatCtaBlock(options.name ?? path, result.cta as CtaBlock | undefined)
+    return jsonResponse(
+      {
+        ok: false,
+        error: {
+          code: 'SANITIZED_OUTPUT_BLOCKED',
+          message: 'Command output was blocked by sanitization',
+          ...(sanitized.warnings ? { warnings: sanitized.warnings } : undefined),
+        },
+        meta: {
+          command: path,
+          duration,
+          ...(sanitized.warnings ? { warnings: sanitized.warnings } : undefined),
+          ...(cta ? { cta } : undefined),
+        },
+      },
+      500,
+    )
+  }
+
   const cta = formatCtaBlock(options.name ?? path, result.cta as CtaBlock | undefined)
   return jsonResponse(
     {
       ok: true,
-      data: result.data,
+      data: sanitized.output,
       meta: {
         command: path,
         duration,
@@ -2754,13 +3077,26 @@ declare namespace serveImpl {
     rootCommand?: CommandDefinition<any, any, any> | undefined
     /** Root fetch handler, invoked when no subcommand matches and no rootCommand is set. */
     rootFetch?: FetchHandler | undefined
+    /** Sanitize callback for agent output. */
+    sanitize?:
+      | ((
+          output: unknown,
+          context: { command: string; agent: boolean },
+        ) => Promise<{
+          output: unknown
+          blocked: boolean
+          warnings?: string[] | undefined
+        }>)
+      | undefined
     sync?:
       | false
       | {
           body?: string | undefined
+          contextRules?: string[] | undefined
           cwd?: string | undefined
           depth?: number | undefined
           include?: string[] | undefined
+          skills?: Array<{ name: string; content: string }> | undefined
           suggestions?: string[] | undefined
         }
       | undefined
@@ -2812,8 +3148,17 @@ function extractBuiltinFlags(argv: string[], options: extractBuiltinFlags.Option
       version = true
     else if (token === '--schema') schema = true
     else if (token === '--json') {
-      format = 'json'
-      formatExplicit = true
+      // If the next token looks like a JSON payload (starts with { or [), pass both through
+      // to the command parser so `--json <payload>` is handled by getEffectiveOptionsSchema.
+      const next = argv[i + 1]
+      if (next !== undefined && (next.startsWith('{') || next.startsWith('['))) {
+        rest.push(token)
+        rest.push(next)
+        i++
+      } else {
+        format = 'json'
+        formatExplicit = true
+      }
     } else if (token === '--format' && argv[i + 1]) {
       if (!validFormats.has(argv[i + 1]! as any))
         throw new ParseError({
@@ -2838,7 +3183,7 @@ function extractBuiltinFlags(argv: string[], options: extractBuiltinFlags.Option
     } else if (noCfgFlag && token === noCfgFlag) {
       configPath = undefined
       configDisabled = true
-    } else if (token === '--filter-output' && argv[i + 1]) {
+    } else if ((token === '--filter-output' || token === '--fields') && argv[i + 1]) {
       filterOutput = argv[i + 1]!
       i++
     } else if (token === '--token-limit' && argv[i + 1]) {
@@ -3235,7 +3580,7 @@ export type CommandsMap = Record<
 >
 
 /** @internal Entry stored in a command map — either a leaf definition, a group, or a fetch gateway. */
-type CommandEntry =
+export type CommandEntry =
   | CommandDefinition<any, any, any>
   | InternalGroup
   | InternalFetchGateway
@@ -3251,7 +3596,7 @@ export type FetchHandler = Fetch.Handler
 export type FetchSource = Fetch.Source
 
 /** @internal A command group's internal storage. */
-type InternalGroup = {
+export type InternalGroup = {
   _group: true
   description?: string | undefined
   mcp?: false | undefined
@@ -3583,6 +3928,7 @@ async function handleStreaming(
     truncate: (s: string) => { text: string; truncated: boolean; nextOffset?: number | undefined }
     write: (output: Output) => void
     writeln: (s: string) => void
+    writelnErr: (s: string) => void
     exit: (code: number) => void
   },
 ) {
@@ -3605,7 +3951,7 @@ async function handleStreaming(
           const tagged = value as any
           if (tagged[sentinel] === 'error') {
             if (useJsonl)
-              ctx.writeln(
+              ctx.writelnErr(
                 JSON.stringify({
                   type: 'error',
                   ok: false,
@@ -3618,7 +3964,7 @@ async function handleStreaming(
                   },
                 }),
               )
-            else ctx.writeln(formatHumanError({ code: tagged.code, message: tagged.message }))
+            else ctx.writelnErr(formatHumanError({ code: tagged.code, message: tagged.message }))
             ctx.exit(tagged.exitCode ?? 1)
             return
           }
@@ -3632,7 +3978,7 @@ async function handleStreaming(
       if (isSentinel(returnValue) && returnValue[sentinel] === 'error') {
         const err = returnValue as ErrorResult
         if (useJsonl)
-          ctx.writeln(
+          ctx.writelnErr(
             JSON.stringify({
               type: 'error',
               ok: false,
@@ -3643,7 +3989,7 @@ async function handleStreaming(
               },
             }),
           )
-        else ctx.writeln(formatHumanError({ code: err.code, message: err.message }))
+        else ctx.writelnErr(formatHumanError({ code: err.code, message: err.message }))
         ctx.exit(err.exitCode ?? 1)
         return
       }
@@ -3668,7 +4014,7 @@ async function handleStreaming(
       else if (cta) ctx.writeln(formatHumanCta(cta))
     } catch (error) {
       if (useJsonl)
-        ctx.writeln(
+        ctx.writelnErr(
           JSON.stringify({
             type: 'error',
             ok: false,
@@ -3680,7 +4026,7 @@ async function handleStreaming(
           }),
         )
       else
-        ctx.writeln(
+        ctx.writelnErr(
           formatHumanError({
             code: 'UNKNOWN',
             message: error instanceof Error ? error.message : String(error),
@@ -3841,6 +4187,8 @@ function collectCommands(
 ): {
   name: string
   description?: string | undefined
+  mutates?: boolean | undefined
+  destructive?: boolean | undefined
   schema?: Record<string, unknown> | undefined
   examples?: { command: string; description?: string | undefined }[] | undefined
 }[] {
@@ -3866,15 +4214,23 @@ function commandManifestEntry(
   path: string[],
   entry: CommandDefinition<any, any, any>,
 ): ReturnType<typeof collectCommands>[number] {
+  const effectiveOpts = getCommandOptionsSchema(entry)
+  const hasDryRun = effectiveOpts ? 'dryRun' in effectiveOpts.shape : false
   const cmd: ReturnType<typeof collectCommands>[number] = { name: path.join(' ') }
   if (entry.description) cmd.description = entry.description
+  if (entry.mutates || hasDryRun) cmd.mutates = true
+  if (entry.destructive) cmd.destructive = entry.destructive
 
-  const inputSchema = buildInputSchema(entry.args, entry.env, entry.options)
+  const inputSchema = buildInputSchema(entry.args, entry.env, effectiveOpts)
   const outputSchema = entry.output ? Schema.toJsonSchema(entry.output) : undefined
-  if (inputSchema || outputSchema) {
+  const bodySchema = entry.body ? Schema.toJsonSchema(entry.body) : undefined
+  const fullInputSchema = entry.input ? Schema.toJsonSchema(entry.input) : undefined
+  if (inputSchema || outputSchema || bodySchema || fullInputSchema) {
     cmd.schema = {}
     if (inputSchema?.args) cmd.schema.args = inputSchema.args
     if (inputSchema?.env) cmd.schema.env = inputSchema.env
+    if (bodySchema) cmd.schema.body = bodySchema
+    if (fullInputSchema) cmd.schema.input = fullInputSchema
     if (inputSchema?.options) cmd.schema.options = inputSchema.options
     if (outputSchema) cmd.schema.output = outputSchema
   }
@@ -3937,7 +4293,8 @@ function skillCommandEntry(path: string[], entry: SkillCommandSource): Skill.Com
   if (entry.env) cmd.env = entry.env
   if (entry.hint) cmd.hint = entry.hint
   if (isDestructive(entry)) cmd.hint = appendDestructiveHint(cmd.hint)
-  if (entry.options) cmd.options = entry.options
+  const effectiveOpts = getCommandOptionsSchema(entry)
+  if (effectiveOpts) cmd.options = effectiveOpts
   if (entry.output) cmd.output = entry.output
   const examples = formatExamples(entry.examples)
   if (examples) {
@@ -3953,14 +4310,18 @@ function skillCommandEntry(path: string[], entry: SkillCommandSource): Skill.Com
 type SkillCommandSource = Pick<
   CommandDefinition<any, any, any, any, any, any>,
   | 'args'
+  | 'body'
   | 'description'
   | 'destructive'
   | 'env'
   | 'examples'
   | 'hint'
+  | 'input'
   | 'mcp'
+  | 'mutates'
   | 'options'
   | 'output'
+  | 'paginate'
 >
 
 function isDestructive(command: SkillCommandSource): boolean {
@@ -4114,11 +4475,13 @@ declare namespace Output {
     duration: string
     /** Offset to pass as `--token-offset` to fetch the next page of truncated output. */
     nextOffset?: number | undefined
+    /** Warnings from sanitization or validation. */
+    warnings?: string[] | undefined
   }
 }
 
 /** @internal Defines a command's schema, handler, and metadata. */
-type CommandDefinition<
+export type CommandDefinition<
   args extends z.ZodObject<any> | undefined = undefined,
   env extends z.ZodObject<any> | undefined = undefined,
   options extends z.ZodObject<any> | undefined = undefined,
@@ -4131,16 +4494,30 @@ type CommandDefinition<
   aliases?: string[] | undefined
   /** Zod schema for positional arguments. */
   args?: args | undefined
+  /**
+   * Zod schema for the request body (used by generated commands).
+   * Typically an object schema — fields are flattened into individual
+   * `--<prop>` option flags for ergonomics. Array and primitive body
+   * schemas are also supported for OpenAPI endpoints that declare
+   * non-object request bodies; those flow through `--json` or the
+   * `--body` JSON escape hatch exposed by the handler.
+   */
+  body?: z.ZodType | undefined
+  /**
+   * Whether this command is destructive (e.g. DELETE). Agents are warned
+   * before execution, and the hint is carried into generated agent skills.
+   */
+  destructive?: boolean | undefined
   /** Zod schema for environment variables. Keys are the variable names (e.g. `NPM_TOKEN`). */
   env?: env | undefined
-  /** Marks this command as destructive when generating agent skills. */
-  destructive?: boolean | undefined
   /** Usage examples for this command. */
   examples?: Example<args, options>[] | undefined
   /** Default output format. Overridden by `--format` or `--json`. */
   format?: Formatter.Format | undefined
   /** Plain text hint displayed after examples and before global options. */
   hint?: string | undefined
+  /** Zod schema for the full input payload (used by generated commands). */
+  input?: z.ZodObject<any> | undefined
   /** MCP-specific metadata exposed when this command is served as a tool. */
   mcp?:
     /** Set to `false` to hide this command from MCP clients. */
@@ -4156,8 +4533,12 @@ type CommandDefinition<
         instructions?: string | undefined
       }
     | undefined
+  /** Whether this command mutates state. Injects `--dry-run` option. */
+  mutates?: boolean | undefined
   /** Zod schema for the command's return value. */
   output?: output | undefined
+  /** Whether this command supports pagination. Injects `--page-size` option. */
+  paginate?: boolean | undefined
   /**
    * Controls when output data is displayed. Inherited by child commands when set on a group.
    *
@@ -4179,6 +4560,8 @@ type CommandDefinition<
     args: InferOutput<args>
     /** The binary name the user invoked (e.g. an alias). Falls back to `name` when not resolvable. */
     displayName: string
+    /** Whether this is a dry-run invocation. */
+    dryRun: boolean
     /** Parsed environment variables. */
     env: InferOutput<env>
     /** Return an error result with optional CTAs. */
@@ -4244,6 +4627,8 @@ function emitDeprecationWarnings(
     }
   }
 }
+
+export { getCommandOptionsSchema }
 
 /** @internal Resolves the display name from `process.argv[1]` basename. Returns the basename if it matches `name` or one of the `aliases`, otherwise falls back to `name`. */
 function resolveDisplayName(name: string, aliases?: string[]): string {

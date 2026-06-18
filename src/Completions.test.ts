@@ -70,6 +70,9 @@ async function serve(
     stdout(s) {
       output += s
     },
+    stderr(s) {
+      output += s
+    },
     exit() {},
   })
   process.env = prevEnv

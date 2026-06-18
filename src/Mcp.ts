@@ -2,10 +2,12 @@ import type { McpServer, Transport } from '@modelcontextprotocol/server'
 import type { Readable, Writable } from 'node:stream'
 import { z } from 'zod'
 
+import { getEffectiveOptionsSchema } from './CommandOptions.js'
 import * as Command from './internal/command.js'
 import { formatCtaBlock, type FormattedCtaBlock, renderCtaText } from './internal/cta.js'
 import * as Json from './internal/json.js'
 import type { Handler as MiddlewareHandler } from './middleware.js'
+import * as Sanitize from './Sanitize.js'
 import * as Schema from './Schema.js'
 
 /** Starts a stdio MCP server that exposes commands as tools. */
@@ -31,6 +33,7 @@ export async function serve(
     fromJsonSchema,
     middlewares: options.middlewares,
     name,
+    sanitize: options.sanitize,
     sendNotification: (notification) => server.server.notification(notification),
     tools: options.tools,
     vars: options.vars,
@@ -88,6 +91,8 @@ export declare namespace serve {
     middlewares?: MiddlewareHandler[] | undefined
     /** Override output stream. Defaults to `process.stdout`. */
     output?: Writable | undefined
+    /** Sanitizes tool output before it is returned to the agent. */
+    sanitize?: SanitizeCallback | undefined
     /** Vars schema for middleware variables. */
     vars?: z.ZodObject<any> | undefined
     /** CLI version string. */
@@ -100,6 +105,16 @@ export declare namespace serve {
     tools?: ToolFilter | undefined
   }
 }
+
+/** Sanitize callback signature used by both `serve` and `callTool`. */
+export type SanitizeCallback = (
+  output: unknown,
+  context: { command: string; agent: boolean },
+) => Promise<{
+  output: unknown
+  blocked: boolean
+  warnings?: string[] | undefined
+}>
 
 /** @internal Executes a tool call and returns a CallToolResult. */
 export async function callTool(
@@ -117,6 +132,7 @@ export async function callTool(
     middlewares?: MiddlewareHandler[] | undefined
     env?: z.ZodObject<any> | undefined
     vars?: z.ZodObject<any> | undefined
+    sanitize?: SanitizeCallback | undefined
   } = {},
 ): Promise<{
   content: { type: 'text'; text: string }[]
@@ -166,7 +182,9 @@ export async function callTool(
         isError: true,
       }
     }
-    return { content: [{ type: 'text', text: Json.stringify(chunks) }] }
+    const sanitizedChunks = await sanitizeToolOutput(chunks, tool.name, options.sanitize)
+    if (sanitizedChunks.blocked) return sanitizedChunks.result
+    return { content: [{ type: 'text', text: Json.stringify(sanitizedChunks.output) }] }
   }
 
   if (!result.ok) {
@@ -182,7 +200,9 @@ export async function callTool(
   }
 
   const data = result.data ?? null
-  const jsonData = Json.normalize(data)
+  const sanitized = await sanitizeToolOutput(data, tool.name, options.sanitize)
+  if (sanitized.blocked) return sanitized.result
+  const jsonData = Json.normalize(sanitized.output)
   const cta = formatCtaBlock(options.name ?? tool.name, result.cta as Command.CtaBlock | undefined)
   const text = Json.stringify(jsonData)
   return {
@@ -193,6 +213,47 @@ export async function callTool(
       : undefined),
     ...(cta ? { _meta: { cta } } : undefined),
   }
+}
+
+/**
+ * Runs the configured sanitizer over command output before it reaches the
+ * agent. Returns either the payload to render or a blocked result the caller
+ * must return verbatim. Warnings are folded into object payloads under
+ * `_warnings` so the agent sees them inline rather than only in `_meta`.
+ */
+async function sanitizeToolOutput(
+  value: unknown,
+  command: string,
+  sanitize: SanitizeCallback | undefined,
+): Promise<
+  | { blocked: true; result: { content: { type: 'text'; text: string }[]; isError: true } }
+  | { blocked: false; output: unknown }
+> {
+  const result = await Sanitize.sanitize(value, { agent: true, command }, sanitize)
+  if (result.blocked)
+    return {
+      blocked: true,
+      result: {
+        content: [
+          {
+            type: 'text',
+            text: Json.stringify({
+              code: 'SANITIZED_OUTPUT_BLOCKED',
+              message: 'Command output was blocked by sanitization',
+              ...(result.warnings ? { warnings: result.warnings } : undefined),
+            }),
+          },
+        ],
+        isError: true,
+      },
+    }
+
+  const hasWarnings = (result.warnings?.length ?? 0) > 0
+  const output =
+    hasWarnings && result.output && typeof result.output === 'object'
+      ? { ...(result.output as Record<string, unknown>), _warnings: result.warnings }
+      : result.output
+  return { blocked: false, output }
 }
 
 /** @internal A progress notification sent during streaming tool calls. */
@@ -265,6 +326,8 @@ export declare namespace registerTools {
     name: string
     /** Resolves the inbound HTTP request from MCP call metadata. */
     request?: ((extra: any) => Request | undefined) | undefined
+    /** Sanitizes tool output before it is returned to the agent. */
+    sanitize?: SanitizeCallback | undefined
     /** Sends MCP progress notifications. */
     sendNotification?: ((notification: ProgressNotification) => Promise<void>) | undefined
     /** Tool exposure options. */
@@ -283,7 +346,7 @@ function registerDirectTool(
 ) {
   const mergedShape: Record<string, any> = {
     ...tool.command.args?.shape,
-    ...tool.command.options?.shape,
+    ...getEffectiveOptionsSchema(tool.command)?.shape,
   }
   const hasInput = Object.keys(mergedShape).length > 0
 
@@ -437,6 +500,7 @@ function callOptions(options: registerTools.Options, extra: any) {
     middlewares: options.middlewares,
     name: options.name,
     request: options.request?.(extra),
+    sanitize: options.sanitize,
     ...(options.sendNotification ? { sendNotification: options.sendNotification } : undefined),
     vars: options.vars,
     version: options.version,
@@ -520,9 +584,12 @@ function toToolEntry(entry: any, path: string[], middlewares: MiddlewareHandler[
   const mcp = entry.mcp === false ? undefined : entry.mcp
   const outputSchema = entry.output ? mcpOutputSchema(entry.output) : undefined
   return {
-    name: mcp?.name ?? path.join('_'),
-    description: mcp?.description ?? entry.description,
-    inputSchema: buildToolSchema(entry.args, entry.options),
+    // Dashes are legal in MCP tool names but read as separate tokens to
+    // models; normalizing to underscores keeps `sync-skills` addressable
+    // as `sync_skills`, matching the command path segments.
+    name: mcp?.name ?? path.map((segment) => segment.replaceAll('-', '_')).join('_'),
+    description: formatDescription(entry, mcp?.description),
+    inputSchema: buildToolSchema(entry.args, getEffectiveOptionsSchema(entry)),
     ...(outputSchema ? { outputSchema } : undefined),
     ...(mcp?.annotations ? { annotations: mcp.annotations } : undefined),
     ...(mcp?.instructions ? { instructions: mcp.instructions } : undefined),
@@ -560,6 +627,22 @@ function mcpOutputSchema(output: any): Record<string, unknown> | undefined {
   const schema = Schema.toJsonSchema(output) as Record<string, unknown>
   if (schema.type === 'object') return schema
   return undefined
+}
+
+/** Hint appended to destructive command descriptions. */
+const destructiveHintText = 'confirm with user before executing'
+
+/**
+ * Builds the tool description, folding in the destructive-command hint.
+ * The hint goes in the description text rather than only in
+ * `annotations.destructiveHint` because many MCP clients surface descriptions
+ * verbatim to the model while dropping annotations.
+ */
+function formatDescription(command: any, override?: string | undefined): string | undefined {
+  const description = override ?? command.description
+  if (!description) return command.destructive ? destructiveHintText : undefined
+  if (command.destructive) return `${description}. ${destructiveHintText}`
+  return description
 }
 
 /** @internal Builds a merged JSON Schema from args and options Zod schemas. */
