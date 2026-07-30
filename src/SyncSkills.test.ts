@@ -1,17 +1,55 @@
 import { Cli, SyncSkills, z } from 'incur'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 let savedXdg: string | undefined
+let scratchXdg: string | undefined
 
 beforeEach(() => {
   savedXdg = process.env.XDG_DATA_HOME
+  // Isolation is default-on, not opt-in. `hashPath()` falls back to
+  // ~/.local/share when XDG_DATA_HOME is unset, so any test that forgot to set
+  // it wrote a real metadata file into the developer's home, named after
+  // whatever CLI that test constructed. One fixture here builds a CLI called
+  // `devctl` and pointed its `includeCwd` at a temp dir it then deleted —
+  // which broke the actual devctl CLI on every machine that had run this
+  // suite, until the stale file was removed by hand. Tests needing a specific
+  // XDG root still assign over this.
+  scratchXdg = mkdtempSync(join(tmpdir(), 'incur-xdg-'))
+  process.env.XDG_DATA_HOME = scratchXdg
 })
 
 afterEach(() => {
   if (savedXdg === undefined) delete process.env.XDG_DATA_HOME
   else process.env.XDG_DATA_HOME = savedXdg
+  if (scratchXdg) rmSync(scratchXdg, { recursive: true, force: true })
+  scratchXdg = undefined
+})
+
+test('skills metadata never lands in the real home when a test omits XDG_DATA_HOME', async () => {
+  // Guards the default above. This test deliberately does not set
+  // XDG_DATA_HOME, mirroring the fixtures that leaked, and asserts the write
+  // is contained. `devctl` is the CLI name that actually got poisoned.
+  const cli = Cli.create('devctl', { description: 'Leak guard' })
+  cli.command('auth login', { description: 'Log in', run: () => ({}) })
+
+  await SyncSkills.sync('devctl', Cli.toCommands.get(cli)!, {
+    global: false,
+    cwd: mkdtempSync(join(tmpdir(), 'incur-leakguard-')),
+  })
+
+  const xdg = process.env.XDG_DATA_HOME
+  expect(xdg).toBeDefined()
+  expect(existsSync(join(xdg!, 'incur', 'devctl.json'))).toBe(true)
+  expect(existsSync(join(homedir(), '.local', 'share', 'incur', 'devctl.json'))).toBe(false)
 })
 
 test('generates skill files and installs to canonical location', async () => {
