@@ -1,5 +1,11 @@
 # incur
 
+## 0.6.1
+
+### Patch Changes
+
+- 5bb43b6: Fix MCP stdio transport import so it is statically analyzable by `bun build --compile`. The previous dynamic specifier caused compiled single-file executables to fail at runtime with "Cannot find module '@modelcontextprotocol/server/stdio'". The import remains lazy and is only evaluated when an MCP server actually starts.
+
 ## 0.6.0
 
 ### Minor Changes
