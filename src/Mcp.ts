@@ -74,12 +74,14 @@ async function importStdioServerTransport(
 }
 
 function importStdioModule(): Promise<StdioImportResult> {
-  return importModule('@modelcontextprotocol/server/stdio')
+  // Keep the specifier as a literal string. A dynamic variable is invisible to
+  // static analysis, so bun build --compile omits the module and the binary
+  // fails at runtime with "Cannot find module ...". The literal is still lazy:
+  // import() is only evaluated when an MCP server actually starts.
+  return import('@modelcontextprotocol/server/stdio')
     .then((module) => ({ module }))
     .catch((error: unknown) => ({ error }))
 }
-
-const importModule = (specifier: string): Promise<unknown> => import(specifier)
 
 export declare namespace serve {
   /** Options for the MCP server. */

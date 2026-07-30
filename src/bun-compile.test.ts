@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -14,6 +14,52 @@ function exec(
       if (error) reject(new Error(stderr?.trim() || stdout?.trim() || error.message))
       else resolve({ stdout, stderr })
     })
+  })
+}
+
+type JsonRpcMessage = {
+  jsonrpc: string
+  id?: number | string
+  method?: string
+  params?: unknown
+  result?: unknown
+  error?: unknown
+}
+
+/** Spawns the compiled binary with `--mcp`, sends JSON-RPC messages, and returns parsed responses. */
+function mcpSession(
+  bin: string,
+  messages: { method: string; params?: unknown; id?: number }[],
+): Promise<{ responses: JsonRpcMessage[]; stderr: string; exitCode: number | null }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, ['--mcp'], { stdio: ['pipe', 'pipe', 'pipe'] })
+    const stdout: string[] = []
+    const stderr: string[] = []
+    const timeout = setTimeout(() => {
+      child.kill('SIGKILL')
+      reject(new Error('MCP session timed out'))
+    }, 30_000)
+
+    child.stdout.on('data', (chunk) => stdout.push(chunk.toString()))
+    child.stderr.on('data', (chunk) => stderr.push(chunk.toString()))
+    child.on('error', (error) => {
+      clearTimeout(timeout)
+      reject(error)
+    })
+    child.on('close', (exitCode) => {
+      clearTimeout(timeout)
+      const output = stdout.join('')
+      const err = stderr.join('')
+      const responses = output
+        .split('\n')
+        .filter((line) => line.trim())
+        .map((line): JsonRpcMessage => JSON.parse(line))
+      resolve({ responses, stderr: err, exitCode })
+    })
+
+    for (const message of messages)
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`)
+    child.stdin.end()
   })
 }
 
@@ -149,4 +195,39 @@ cli.serve()
       'description: Inline skill baked into the compiled binary at build time.',
     )
   }, 30_000)
+
+  test('serves MCP stdio over --mcp', async () => {
+    // Guards the literal specifier in Mcp.importStdioModule. A dynamic
+    // specifier is invisible to bun build --compile, so the binary fails at
+    // runtime with "Cannot find module '@modelcontextprotocol/server/stdio'".
+    const initId = 1
+    const listId = 2
+    const { responses, stderr, exitCode } = await mcpSession(bin, [
+      {
+        id: initId,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2024-11-05',
+          capabilities: {},
+          clientInfo: { name: 'test-client', version: '1.0.0' },
+        },
+      },
+      { method: 'notifications/initialized' },
+      { id: listId, method: 'tools/list' },
+    ])
+
+    expect(stderr).not.toContain('Cannot find module')
+    expect(exitCode).toBe(0)
+
+    const initResponse = responses.find((response) => response.id === initId)
+    expect(initResponse).toBeDefined()
+    const initResult = initResponse!.result as { serverInfo?: unknown; protocolVersion?: string }
+    expect(initResult.serverInfo).toBeDefined()
+    expect(initResult.protocolVersion).toBe('2024-11-05')
+
+    const listResponse = responses.find((response) => response.id === listId)
+    expect(listResponse).toBeDefined()
+    const listResult = listResponse!.result as { tools?: unknown[] }
+    expect(Array.isArray(listResult.tools)).toBe(true)
+  }, 60_000)
 })
