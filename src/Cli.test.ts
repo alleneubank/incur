@@ -328,9 +328,9 @@ describe('fs', () => {
       globals: z.object({ rpcUrl: z.string() }),
     }).command(admin)
 
-    await expect(serve(cli, ['admin', 'deploy', '--rpc-url', 'http://x'])).rejects.toThrow(
-      /conflicts with a global option/,
-    )
+    const { exitCode, output } = await serve(cli, ['admin', 'deploy', '--rpc-url', 'http://x'])
+    expect(exitCode).toBe(1)
+    expect(output).toMatch(/conflicts with a global option/)
   })
 
   test('ignores private, test, declaration, and unsupported files', async () => {
@@ -6724,7 +6724,25 @@ describe('fetch', () => {
       `)
     })
 
-    test('POST /mcp applies sanitize hook before returning tool output', async () => {
+    // Sanitization must hold on every route that can return command output to
+    // an agent, so both discovery modes are asserted: `direct` exposes the
+    // command as its own tool, `progressive` (the default) reaches it through
+    // the call_write_tool dispatcher.
+    const blockedSanitizeResult = {
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            code: 'SANITIZED_OUTPUT_BLOCKED',
+            message: 'Command output was blocked by sanitization',
+            warnings: ['unsafe response'],
+          }),
+        },
+      ],
+    }
+
+    function sanitizeCli(discovery: 'direct' | 'progressive') {
       const cli = Cli.create('test', {
         version: '1.0.0',
         sanitize: async () => ({
@@ -6732,6 +6750,7 @@ describe('fetch', () => {
           blocked: true,
           warnings: ['unsafe response'],
         }),
+        mcp: { tools: { discovery } },
       })
       cli.command('show', {
         run() {
@@ -6740,6 +6759,11 @@ describe('fetch', () => {
           }
         },
       })
+      return cli
+    }
+
+    test('POST /mcp applies sanitize hook before returning tool output', async () => {
+      const cli = sanitizeCli('direct')
 
       const { sessionId } = await initSession(cli)
       const res = await mcpRequest(
@@ -6754,19 +6778,26 @@ describe('fetch', () => {
       )
       expect(res.status).toBe(200)
       const body = await res.json()
-      expect(body.result).toMatchObject({
-        isError: true,
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({
-              code: 'SANITIZED_OUTPUT_BLOCKED',
-              message: 'Command output was blocked by sanitization',
-              warnings: ['unsafe response'],
-            }),
-          },
-        ],
-      })
+      expect(body.result).toMatchObject(blockedSanitizeResult)
+    })
+
+    test('POST /mcp applies sanitize hook through progressive tool dispatch', async () => {
+      const cli = sanitizeCli('progressive')
+
+      const { sessionId } = await initSession(cli)
+      const res = await mcpRequest(
+        cli,
+        {
+          jsonrpc: '2.0',
+          id: 3,
+          method: 'tools/call',
+          params: { name: 'call_write_tool', arguments: { name: 'show', arguments: {} } },
+        },
+        sessionId,
+      )
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body.result).toMatchObject(blockedSanitizeResult)
     })
 
     test('non-/mcp paths still route to command API', async () => {

@@ -3,6 +3,7 @@ import type { Readable, Writable } from 'node:stream'
 import { z } from 'zod'
 
 import { getEffectiveOptionsSchema } from './CommandOptions.js'
+import { IncurError } from './Errors.js'
 import * as Command from './internal/command.js'
 import { formatCtaBlock, type FormattedCtaBlock, renderCtaText } from './internal/cta.js'
 import * as Json from './internal/json.js'
@@ -265,6 +266,8 @@ type ProgressNotification = {
 /** @internal A resolved tool entry from the command tree. */
 export type ToolEntry = {
   name: string
+  /** Space-joined command path this tool projects from, e.g. `sync skills`. */
+  commandPath: string
   description?: string | undefined
   inputSchema: { type: 'object'; properties: Record<string, unknown>; required?: string[] }
   outputSchema?: Record<string, unknown> | undefined
@@ -588,6 +591,7 @@ function toToolEntry(entry: any, path: string[], middlewares: MiddlewareHandler[
     // models; normalizing to underscores keeps `sync-skills` addressable
     // as `sync_skills`, matching the command path segments.
     name: mcp?.name ?? path.map((segment) => segment.replaceAll('-', '_')).join('_'),
+    commandPath: path.join(' '),
     description: formatDescription(entry, mcp?.description),
     inputSchema: buildToolSchema(entry.args, getEffectiveOptionsSchema(entry)),
     ...(outputSchema ? { outputSchema } : undefined),
@@ -616,10 +620,18 @@ function patternToRegExp(pattern: string) {
 }
 
 function assertUniqueToolNames(tools: ToolEntry[]) {
-  const seen = new Set<string>()
+  // Underscore projection maps distinct command paths onto one tool name
+  // (`foo-bar baz` and `foo bar-baz` both become `foo_bar_baz`), so the
+  // collision is only actionable if the error names both paths.
+  const seen = new Map<string, string>()
   for (const tool of tools) {
-    if (seen.has(tool.name)) throw new Error(`Duplicate MCP tool name: ${tool.name}`)
-    seen.add(tool.name)
+    const existing = seen.get(tool.name)
+    if (existing !== undefined && existing !== tool.commandPath)
+      throw new IncurError({
+        code: 'MCP_TOOL_NAME_COLLISION',
+        message: `MCP tool name collision for '${tool.name}': '${existing}' and '${tool.commandPath}'`,
+      })
+    seen.set(tool.name, tool.commandPath)
   }
 }
 

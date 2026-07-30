@@ -300,14 +300,14 @@ describe('Mcp', () => {
         {
           id: 3,
           method: 'tools/call',
-          params: { name: 'get_tool_details', arguments: { name: 'read-user' } },
+          params: { name: 'get_tool_details', arguments: { name: 'read_user' } },
         },
         {
           id: 4,
           method: 'tools/call',
           params: {
             name: 'call_read_tool',
-            arguments: { name: 'read-user', arguments: { id: '1' } },
+            arguments: { name: 'read_user', arguments: { id: '1' } },
           },
         },
         {
@@ -315,7 +315,7 @@ describe('Mcp', () => {
           method: 'tools/call',
           params: {
             name: 'call_read_tool',
-            arguments: { name: 'delete-user', arguments: { id: '1' } },
+            arguments: { name: 'delete_user', arguments: { id: '1' } },
           },
         },
         {
@@ -323,7 +323,7 @@ describe('Mcp', () => {
           method: 'tools/call',
           params: {
             name: 'call_write_tool',
-            arguments: { name: 'delete-user', arguments: { id: '1' } },
+            arguments: { name: 'delete_user', arguments: { id: '1' } },
           },
         },
         {
@@ -331,7 +331,7 @@ describe('Mcp', () => {
           method: 'tools/call',
           params: {
             name: 'call_write_tool',
-            arguments: { name: 'read-user', arguments: { id: '1' } },
+            arguments: { name: 'read_user', arguments: { id: '1' } },
           },
         },
       ],
@@ -341,21 +341,21 @@ describe('Mcp', () => {
     const byId = new Map(responses.map((response) => [response.id, response]))
     const search = JSON.parse(byId.get(2).result.content[0].text)
     expect(search.tools).toHaveLength(1)
-    expect(search.tools[0]).toMatchObject({ name: 'delete-user' })
+    expect(search.tools[0]).toMatchObject({ name: 'delete_user' })
     expect(search.tools[0]).not.toHaveProperty('inputSchema')
 
     const details = JSON.parse(byId.get(3).result.content[0].text)
-    expect(details.name).toBe('read-user')
+    expect(details.name).toBe('read_user')
     expect(details.inputSchema.properties.id).toBeDefined()
     expect(JSON.parse(byId.get(4).result.content[0].text)).toEqual({ id: '1' })
     expect(byId.get(5).result).toMatchObject({ isError: true })
     expect(JSON.parse(byId.get(5).result.content[0].text)).toEqual({
-      error: 'Tool is not read-only: delete-user',
+      error: 'Tool is not read-only: delete_user',
     })
     expect(JSON.parse(byId.get(6).result.content[0].text)).toEqual({ deleted: '1' })
     expect(byId.get(7).result).toMatchObject({ isError: true })
     expect(JSON.parse(byId.get(7).result.content[0].text)).toEqual({
-      error: 'Tool is read-only: read-user',
+      error: 'Tool is read-only: read_user',
     })
   })
 
@@ -373,11 +373,14 @@ describe('Mcp', () => {
           params: { name: 'search_tools', arguments: { query: 'list' } },
         },
       ],
-      { tools: { discovery: 'progressive', exclude: ['secret-*'] } },
+      // Filters match the projected tool name, not the command path, so
+      // patterns are written against underscores: `secret-*` would not match
+      // `secret_list` and the tool would stay exposed.
+      { tools: { discovery: 'progressive', exclude: ['secret_*'] } },
     )
 
     expect(JSON.parse(res.result.content[0].text).tools.map((tool: any) => tool.name)).toEqual([
-      'docs-list',
+      'docs_list',
     ])
   })
 
@@ -392,9 +395,12 @@ describe('Mcp', () => {
 
     expect(Mcp.collectTools(commands, []).map((tool) => tool.name)).toMatchInlineSnapshot(`
       [
+        "deploy",
+        "destroy",
         "echo",
         "fail",
         "greet_hello",
+        "issue_update",
         "ping",
         "stream",
       ]
@@ -502,7 +508,7 @@ describe('Mcp', () => {
     })
 
     expect(() => Mcp.collectTools(commands, [])).toThrowError(
-      'Duplicate MCP tool name: get_balance',
+      "MCP tool name collision for 'get_balance': 'whoami' and 'balance'",
     )
   })
 
@@ -724,6 +730,7 @@ describe('Mcp', () => {
     const result = await Mcp.callTool(
       {
         name: 'whois',
+        commandPath: 'whois',
         inputSchema: { type: 'object', properties: {} },
         outputSchema: {
           type: 'object',
@@ -749,6 +756,7 @@ describe('Mcp', () => {
     const result = await Mcp.callTool(
       {
         name: 'whois',
+        commandPath: 'whois',
         inputSchema: { type: 'object', properties: {} },
         command: {
           async *run() {
@@ -1088,7 +1096,7 @@ describe('Mcp', () => {
       { id: 1, method: 'initialize', params: initParams },
       { id: 2, method: 'tools/list', params: {} },
     ])
-    const tool = res.result.tools.find((t: any) => t.name === 'read-data')
+    const tool = res.result.tools.find((t: any) => t.name === 'read_data')
     expect(tool.annotations).toEqual({ readOnlyHint: true, idempotentHint: true })
   })
 

@@ -6,15 +6,19 @@ import * as McpSource from './McpSource.js'
 
 function serve(cli: { serve: Cli.Cli['serve'] }, argv: string[]) {
   let output = ''
+  // Failed commands render their envelope on stderr, so error assertions read
+  // this rather than `output`.
+  let errorOutput = ''
   let exitCode: number | undefined
   return cli
     .serve(argv, {
       stdout: (s) => (output += s),
+      stderr: (s) => (errorOutput += s),
       exit: (c) => {
         exitCode = c
       },
     })
-    .then(() => ({ output, exitCode }))
+    .then(() => ({ output, errorOutput, exitCode }))
 }
 
 function json(output: string) {
@@ -116,7 +120,8 @@ describe('remote MCP command sources', () => {
       remote.command(`tool-${index}`, { run: () => ({ index }) })
     const cli = mountRemote(remote)
 
-    const result = await serve(cli, ['docs', 'tool-20', '--json'])
+    // Remote tool names reach the local CLI already projected to underscores.
+    const result = await serve(cli, ['docs', 'tool_20', '--json'])
 
     expect({ exitCode: result.exitCode, body: json(result.output) }).toEqual({
       body: { index: 20 },
@@ -129,7 +134,7 @@ describe('remote MCP command sources', () => {
 
     const result = await serve(cli, ['docs', 'fail', '--message', 'boom', '--json'])
 
-    expect({ exitCode: result.exitCode, body: json(result.output) }).toMatchInlineSnapshot(`
+    expect({ exitCode: result.exitCode, body: json(result.errorOutput) }).toMatchInlineSnapshot(`
       {
         "body": {
           "code": "MCP_TOOL_ERROR",
