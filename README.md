@@ -506,12 +506,19 @@ my-cli mcp add
 my-cli --llms
 ```
 
-If the CLI binary name differs from its npm package, set `package` so generated MCP and
-skill commands use that trusted package, pinned when `version` is also supplied:
+If the CLI binary name differs from its npm package, set `package` so generated MCP and skill commands use that trusted package, pinned when `version` is also supplied:
 
 ```ts
 Cli.create('my-cli', { package: '@example/my-cli', version: '1.0.0' })
 ```
+
+If a CLI distributes hand-authored skills through another installer, disable incur's generated skills integration entirely:
+
+```ts
+const cli = Cli.create('my-cli', { sync: false })
+```
+
+This removes the built-in `skills` commands, help and completion entries, and stale-skill notices.
 
 ### Session savings
 
