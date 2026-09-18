@@ -55,8 +55,15 @@ export function parse<
           rawArgvOptions[name] = ((rawArgvOptions[name] as number) ?? 0) + 1
           i++
         } else if (isBooleanOption(name, optionsSchema)) {
-          rawArgvOptions[name] = true
-          i++
+          // `--flag false` is false, not `--flag` plus a stray positional.
+          const value = argv[i + 1]
+          if (value === 'true' || value === 'false') {
+            rawArgvOptions[name] = value === 'true'
+            i += 2
+          } else {
+            rawArgvOptions[name] = true
+            i++
+          }
         } else {
           const value = argv[i + 1]
           if (value === undefined)
@@ -104,8 +111,20 @@ export function parse<
 
   // Assign positionals to args schema keys in order; a final array key collects the rest
   const rawArgs: Record<string, unknown> = {}
+  const argKeys = argsSchema ? Object.keys(argsSchema.shape) : []
+  const variadic = argsSchema !== undefined && argKeys.some((key) => isArrayField(key, argsSchema))
+  if (!variadic && positionals.length > argKeys.length) {
+    // The value is not echoed: a misplaced positional can be a credential.
+    const takes =
+      argKeys.length === 0
+        ? 'none (pass values as --flags)'
+        : `${argKeys.length}: ${argKeys.map((key) => `<${key}>`).join(' ')}`
+    throw new ParseError({
+      message: `Unexpected positional argument ${argKeys.length + 1}; this command takes ${takes}`,
+    })
+  }
   if (argsSchema) {
-    const keys = Object.keys(argsSchema.shape)
+    const keys = argKeys
     for (let j = 0; j < keys.length; j++) {
       const key = keys[j]!
       if (isArrayField(key, argsSchema)) {

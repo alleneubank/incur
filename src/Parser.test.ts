@@ -130,6 +130,30 @@ describe('parse', () => {
     expect(result.options).toEqual({ noConnect: true })
   })
 
+  test('throws ParseError for a positional beyond the args schema, without echoing it', () => {
+    const parse = () =>
+      Parser.parse(['C1', 'secret-wxyz'], { args: z.object({ channel: z.string() }) })
+    expect(parse).toThrow(
+      expect.objectContaining({
+        name: 'Incur.ParseError',
+        message: 'Unexpected positional argument 2; this command takes 1: <channel>',
+      }),
+    )
+    expect(parse).not.toThrow(/wxyz/)
+  })
+
+  test('throws ParseError for a positional when the command takes none', () => {
+    expect(() =>
+      Parser.parse(['U123'], { options: z.object({ user: z.string().optional() }) }),
+    ).toThrow(
+      expect.objectContaining({
+        name: 'Incur.ParseError',
+        message:
+          'Unexpected positional argument 1; this command takes none (pass values as --flags)',
+      }),
+    )
+  })
+
   test('throws ParseError for --no-<x> when neither <x> nor noX is registered', () => {
     expect(() =>
       Parser.parse(['--no-unknown'], {
@@ -176,6 +200,15 @@ describe('parse', () => {
       options: z.object({ dry: z.boolean() }),
     })
     expect(result.options).toEqual({ dry: true })
+  })
+
+  test('a boolean flag takes an explicit true or false value', () => {
+    const options = z.object({ dry: z.boolean(), name: z.string().optional() })
+    expect(Parser.parse(['--dry', 'false'], { options }).options).toEqual({ dry: false })
+    expect(Parser.parse(['--dry', 'true', '--name', 'x'], { options }).options).toEqual({
+      dry: true,
+      name: 'x',
+    })
   })
 
   test('applies default values for missing options', () => {
