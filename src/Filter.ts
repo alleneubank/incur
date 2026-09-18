@@ -166,6 +166,9 @@ function walkSchema(
 
   const segment = path[index]!
   const type = schema.type as string | undefined
+  // An unconstrained schema (`{}`, as `z.unknown()` emits) allows any path below it.
+  if (type === undefined && !('properties' in schema) && !('additionalProperties' in schema))
+    return true
 
   if ('start' in segment) {
     if (type !== 'array') return false
@@ -175,11 +178,16 @@ function walkSchema(
   if (type === 'array')
     return walkSchema(schema.items as Record<string, unknown> | undefined, path, index)
 
-  if (type !== 'object') return false
+  if (type !== undefined && type !== 'object') return false
   const properties = schema.properties as Record<string, Record<string, unknown>> | undefined
   const prop = properties?.[segment.key]
-  if (!prop) return false
-  return walkSchema(prop, path, index + 1)
+  if (prop) return walkSchema(prop, path, index + 1)
+  // Undeclared keys are unknown only where `additionalProperties: false` closes the object.
+  const additional = schema.additionalProperties
+  if (additional === false) return false
+  if (typeof additional === 'object' && additional !== null)
+    return walkSchema(additional as Record<string, unknown>, path, index + 1)
+  return true
 }
 
 function formatPath(path: FilterPath): string {

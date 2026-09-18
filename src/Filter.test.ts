@@ -1,4 +1,4 @@
-import { Filter } from 'incur'
+import { Filter, Schema, z } from 'incur'
 
 describe('parse', () => {
   test('single key', () => {
@@ -233,5 +233,26 @@ describe('apply', () => {
         "foo": "bar",
       }
     `)
+  })
+})
+
+describe('validate', () => {
+  function warnings(paths: string, schema: z.ZodType) {
+    return Filter.validate(Filter.parse(paths), Schema.toJsonSchema(schema))
+  }
+
+  test('warns on keys a closed object does not declare', () => {
+    expect(warnings('id,email', z.object({ id: z.string() }))).toEqual(['Unknown field: email'])
+  })
+
+  test('accepts keys an open schema allows and still checks closed schemas below it', () => {
+    const schema = z.looseObject({
+      meta: z.looseObject({ id: z.string() }),
+      byId: z.record(z.string(), z.object({ name: z.string() })),
+      raw: z.unknown(),
+    })
+    expect(
+      warnings('extra,meta.extra,byId.T1.name,byId.T1.email,raw.any.depth,raw[0,2]', schema),
+    ).toEqual(['Unknown field: byId.T1.email'])
   })
 })
