@@ -63,3 +63,27 @@ test('an agent directory aliased to the canonical one is left alone', () => {
 
   rmSync(dir, { recursive: true, force: true })
 })
+
+// Paths are read from the environment on each call. Reading them once at import ignored a HOME set
+// afterwards, so a consumer's in-process `skills add` test installed into the developer's real home.
+test('agent paths follow HOME and config variables set after import', () => {
+  const home = mkdtempSync(join(tmpdir(), 'clac-agents-home-'))
+  mkdirSync(join(home, '.cursor'))
+  mkdirSync(join(home, '.claude'))
+  vi.stubEnv('HOME', home)
+  vi.stubEnv('XDG_CONFIG_HOME', '')
+  vi.stubEnv('CLAUDE_CONFIG_DIR', '')
+  vi.stubEnv('CODEX_HOME', '')
+  try {
+    const detected = Object.fromEntries(
+      Agents.detect().map((agent) => [agent.name, agent.globalSkillsDir]),
+    )
+    expect(detected).toEqual({
+      Cursor: join(home, '.cursor', 'skills'),
+      'Claude Code': join(home, '.claude', 'skills'),
+    })
+  } finally {
+    vi.unstubAllEnvs()
+    rmSync(home, { recursive: true, force: true })
+  }
+})

@@ -998,3 +998,29 @@ test('list results are sorted alphabetically', async () => {
   const names = result.map((s) => s.name)
   expect(names).toEqual([...names].sort())
 })
+
+test('a global sync installs under the HOME set after import', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'incur-home-'))
+  mkdirSync(join(home, '.claude'))
+  vi.stubEnv('HOME', home)
+  vi.stubEnv('XDG_CONFIG_HOME', '')
+  vi.stubEnv('CLAUDE_CONFIG_DIR', '')
+  vi.stubEnv('CODEX_HOME', '')
+  try {
+    const cli = Cli.create('hometest', { description: 'Home test' })
+    cli.command('ping', { description: 'Health check', run: () => ({ pong: true }) })
+
+    const result = await SyncSkills.sync('hometest', Cli.toCommands.get(cli)!, {
+      description: 'Home test',
+      depth: 0,
+    })
+
+    expect(result.paths).toEqual([join(home, '.agents', 'skills', 'hometest')])
+    expect(result.agents.map((agent) => agent.path)).toEqual([
+      join(home, '.claude', 'skills', 'hometest'),
+    ])
+  } finally {
+    vi.unstubAllEnvs()
+    rmSync(home, { recursive: true, force: true })
+  }
+})
