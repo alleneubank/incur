@@ -71,7 +71,7 @@ This repository is a personal fork of `wevm/incur`, published as `@alleneubank/i
 
 Never infer the role from the remote name alone.
 
-**Commit tagging.** The test: *would this commit go in an upstream PR?* yes → no tag; no → `[fork]`.
+**Commit tagging.** The test: _would this commit go in an upstream PR?_ yes → no tag; no → `[fork]`.
 
 - Upstream-bound: conventional subject only (`feat(skills): ...`, `fix(parser): ...`).
 - Fork-only: `[fork] <type>(<scope>): <imperative summary>` — packaging (`@alleneubank/incur`), fork changelog/version bookkeeping, this section of AGENTS.md, release/trusted-publishing plumbing.

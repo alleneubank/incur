@@ -16,8 +16,7 @@ export async function register(
 ): Promise<register.Result> {
   const runner = detectRunner()
   const command =
-    options.command ??
-    defaultCommand(options.cli ?? name, runner, options.package, options.version)
+    options.command ?? defaultCommand(options.cli ?? name, runner, options.package, options.version)
   const targetAgents = options.agents ?? []
   const ampOnly = targetAgents.length === 1 && targetAgents[0] === 'amp'
 
@@ -157,8 +156,7 @@ function packageDependsOn(root: string, name: string): boolean {
 /** @internal Detects the safe package specifier used to run this CLI. */
 export function detectPackageSpecifier(name: string, pkg?: string, version?: string): string {
   if (pkg !== undefined) {
-    if (!safePackageNamePattern.test(pkg))
-      throw new Error(`Invalid npm package name: ${pkg}`)
+    if (!safePackageNamePattern.test(pkg)) throw new Error(`Invalid npm package name: ${pkg}`)
     if (version !== undefined && !exactVersionPattern.test(version))
       throw new Error(`Invalid exact package version: ${version}`)
     return version === undefined ? pkg : `${pkg}@${version}`
