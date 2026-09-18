@@ -7896,6 +7896,36 @@ test('plugin resolution failures surface structured errors', async () => {
   })
 })
 
+test('plugin command options that collide with a global option fail with a clear error', async () => {
+  let ran = false
+  const cli = Cli.create('test', {
+    globals: z.object({ workspace: z.string().optional() }),
+  }).plugin('team', {
+    name: 'team',
+    async resolve({ mount }) {
+      return Cli.create(mount).command('info', {
+        options: z.object({ workspace: z.string().optional() }),
+        run() {
+          ran = true
+          return { ok: true }
+        },
+      })
+    },
+  })
+
+  const { output, exitCode } = await serve(cli, ['team', 'info', '--workspace', 'T1', '--json'])
+  expect({ ran, exitCode, error: json(output) }).toMatchInlineSnapshot(`
+    {
+      "error": {
+        "code": "PLUGIN_RESOLUTION_FAILED",
+        "message": "Command 'team info' option 'workspace' conflicts with a global option. Choose a different name.",
+      },
+      "exitCode": 1,
+      "ran": false,
+    }
+  `)
+})
+
 test('MCP tool-name collisions surface structured startup errors in serve()', async () => {
   const cli = Cli.create('test')
     .command(

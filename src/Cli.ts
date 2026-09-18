@@ -571,12 +571,14 @@ export function create(
           if (subPending && subPending.length > 0) await Promise.all(subPending)
           const subCommands = toCommands.get(sub)!
           const subMiddlewares = toMiddlewares.get(sub)
-          commands.set(pluginName, {
+          const entry: InternalGroup = {
             _group: true,
             description: plugin.description ?? sub.description,
             commands: subCommands,
             ...(subMiddlewares?.length ? { middlewares: subMiddlewares } : undefined),
-          })
+          }
+          assertNoGlobalOptionConflicts(pluginName, entry, toGlobals.get(cli))
+          commands.set(pluginName, entry)
         })(),
       )
       return cli
