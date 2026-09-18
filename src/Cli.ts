@@ -1199,6 +1199,9 @@ async function serveImpl(
   }
 
   if (llms || llmsFull) {
+    // `--token-count` measures the manifest instead of printing it, as it does for command output.
+    const writeManifest = (text: string) =>
+      writeln(tokenCount ? String(estimateTokenCount(text)) : text)
     // Scope to a subtree if command tokens are provided
     let scopedCommands = commands
     const prefix: string[] = []
@@ -1232,10 +1235,10 @@ async function serveImpl(
         const groups = new Map<string, string>()
         const cmds = collectSkillCommands(scopedCommands, collectPrefix, groups, scopedRoot)
         const scopedName = prefix.length > 0 ? `${name} ${prefix.join(' ')}` : name
-        writeln(Skill.generate(scopedName, cmds, groups))
+        writeManifest(Skill.generate(scopedName, cmds, groups))
         return
       }
-      writeln(
+      writeManifest(
         Formatter.format(
           buildManifest(scopedCommands, prefix, options.globals?.schema, scopedRoot),
           formatFlag,
@@ -1248,10 +1251,10 @@ async function serveImpl(
       const groups = new Map<string, string>()
       const cmds = collectSkillCommands(scopedCommands, collectPrefix, groups, scopedRoot)
       const scopedName = prefix.length > 0 ? `${name} ${prefix.join(' ')}` : name
-      writeln(Skill.index(scopedName, cmds, scopedDescription))
+      writeManifest(Skill.index(scopedName, cmds, scopedDescription))
       return
     }
-    writeln(
+    writeManifest(
       Formatter.format(
         buildIndexManifest(scopedCommands, prefix, options.globals?.schema, scopedRoot),
         formatFlag,

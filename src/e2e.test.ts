@@ -2,6 +2,7 @@ import { Cli, Errors, Fetch, Plugins, Skill, Typegen, z } from 'incur'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { estimateTokenCount } from 'tokenx'
 
 import { startTestServer } from '../test/fixtures/connectrpc/server.js'
 import { UserService } from '../test/fixtures/connectrpc/user_pb.js'
@@ -549,6 +550,14 @@ describe('--token-count', () => {
       '--token-count',
     ])
     expect(output.trim()).toBe('1')
+  })
+
+  test('counts the --llms and --llms-full manifests instead of printing them', async () => {
+    for (const argv of [['--llms'], ['--llms-full'], ['--llms', '--format', 'json']]) {
+      const manifest = (await serve(createApp(), argv)).output.replace(/\n$/, '')
+      const { output } = await serve(createApp(), [...argv, '--token-count'])
+      expect({ argv, output }).toEqual({ argv, output: `${estimateTokenCount(manifest)}\n` })
+    }
   })
 })
 
