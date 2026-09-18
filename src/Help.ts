@@ -11,6 +11,8 @@ export function formatRoot(name: string, options: formatRoot.Options = {}): stri
     aliases,
     configFlag,
     description,
+    env,
+    envSource,
     globals,
     hideSkills = false,
     hideMcp = false,
@@ -43,6 +45,7 @@ export function formatRoot(name: string, options: formatRoot.Options = {}): stri
   }
 
   lines.push(...globalOptionsLines(root, configFlag, globals, hideSkills, hideMcp))
+  lines.push(...envLines(env, envSource))
 
   return lines.join('\n')
 }
@@ -57,6 +60,10 @@ export declare namespace formatRoot {
     commands?: { name: string; description?: string | undefined }[] | undefined
     /** A short description of the CLI or group. */
     description?: string | undefined
+    /** Zod schema for environment variables every command reads. */
+    env?: z.ZodObject<any> | undefined
+    /** Source for environment variable values. Defaults to `process.env`. */
+    envSource?: Record<string, string | undefined> | undefined
     /** Custom global options schema and alias map. */
     globals?: GlobalsDescriptor | undefined
     /** Hide the built-in skills integration. */
@@ -235,27 +242,32 @@ export function formatCommand(name: string, options: formatCommand.Options = {})
   if (!options.hideGlobalOptions)
     lines.push(...globalOptionsLines(root, configFlag, globals, hideSkills, hideMcp))
 
-  // Environment Variables
-  if (env) {
-    const entries = envEntries(env)
-    if (entries.length > 0) {
-      lines.push('')
-      lines.push('Environment Variables:')
-      const maxLen = Math.max(...entries.map((e) => e.name.length))
-      for (const entry of entries) {
-        const padding = ' '.repeat(maxLen - entry.name.length)
-        const parts: string[] = [entry.description]
-        const source = envSource ?? defaultEnvSource()
-        if (entry.name in source)
-          parts.push(entry.secret ? 'set' : `set: ${redact(source[entry.name]!)}`)
-        if (entry.defaultValue !== undefined) parts.push(`default: ${entry.defaultValue}`)
-        const desc = parts.length > 1 ? `${parts[0]} (${parts.slice(1).join(', ')})` : parts[0]
-        lines.push(`  ${entry.name}${padding}  ${desc}`)
-      }
-    }
-  }
+  lines.push(...envLines(env, envSource))
 
   return lines.join('\n')
+}
+
+/** Renders the `Environment Variables:` section, showing only whether a secret is set. */
+function envLines(
+  env: z.ZodObject<any> | undefined,
+  envSource: Record<string, string | undefined> | undefined,
+): string[] {
+  if (!env) return []
+  const entries = envEntries(env)
+  if (entries.length === 0) return []
+  const lines = ['', 'Environment Variables:']
+  const maxLen = Math.max(...entries.map((e) => e.name.length))
+  const source = envSource ?? defaultEnvSource()
+  for (const entry of entries) {
+    const padding = ' '.repeat(maxLen - entry.name.length)
+    const parts: string[] = [entry.description]
+    if (entry.name in source)
+      parts.push(entry.secret ? 'set' : `set: ${redact(source[entry.name]!)}`)
+    if (entry.defaultValue !== undefined) parts.push(`default: ${entry.defaultValue}`)
+    const desc = parts.length > 1 ? `${parts[0]} (${parts.slice(1).join(', ')})` : parts[0]
+    lines.push(`  ${entry.name}${padding}  ${desc}`)
+  }
+  return lines
 }
 
 /** Builds the synopsis string with `<required>`, `[optional]`, and `<variadic...>` placeholders. */

@@ -3032,6 +3032,26 @@ describe('env', () => {
     `)
   })
 
+  test('root --help lists the CLI env schema and hides secret values', async () => {
+    const cli = Cli.create('test', {
+      env: z.object({
+        API_TOKEN: z.string().optional().describe('Auth token').meta({ secret: true }),
+        API_URL: z.string().default('https://api.example.com').describe('API URL'),
+      }),
+    })
+    cli.command('deploy', {
+      run() {
+        return {}
+      },
+    })
+
+    const { output } = await serve(cli, ['--help'], { env: { API_TOKEN: 'tok-wxyz' } })
+    expect(output).toContain('Environment Variables:')
+    expect(output).toContain('API_TOKEN  Auth token (set)')
+    expect(output).toContain('API_URL    API URL (default: https://api.example.com)')
+    expect(output).not.toContain('wxyz')
+  })
+
   test('--help shows (set) for env vars present in process.env', async () => {
     const cli = Cli.create('test')
     cli.command('deploy', {
