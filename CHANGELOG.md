@@ -12,8 +12,10 @@
 
   The fork's own deltas are unchanged: agent-safe execution controls, the OpenAPI
   swagger2/runtime-metadata work, `sync.skills` inline options, the `--no-<flag>`
-  parser fix, generated plugins, `@0xbigboss` packaging, and `$HOME` isolation
-  for skills metadata in the test suite.
+  parser fix, generated plugins, and `$HOME` isolation for skills metadata in
+  the test suite.
+
+  The published package name is now `@alleneubank/incur` (was `@0xbigboss/incur`).
 
 ### Patch Changes
 

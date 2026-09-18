@@ -9,6 +9,6 @@
     "tsx": "^4.21.0"
   },
   "dependencies": {
-    "@0xbigboss/incur": "workspace:*"
+    "@alleneubank/incur": "workspace:*"
   }
 }

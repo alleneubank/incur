@@ -84,7 +84,7 @@ importers:
 
   examples/npm:
     dependencies:
-      '@0xbigboss/incur':
+      '@alleneubank/incur':
         specifier: workspace:*
         version: link:../..
     devDependencies:

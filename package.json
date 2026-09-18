@@ -31,13 +31,13 @@
   },
   "packageManager": "pnpm@10.30.2",
   "[!start-pkg]": "",
-  "name": "@0xbigboss/incur",
+  "name": "@alleneubank/incur",
   "type": "module",
   "version": "0.7.0",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/0xBigBoss/incur"
+    "url": "https://github.com/alleneubank/incur"
   },
   "publishConfig": {
     "access": "public"
