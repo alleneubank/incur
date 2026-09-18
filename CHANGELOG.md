@@ -1,5 +1,24 @@
 # incur
 
+## 0.7.0
+
+### Minor Changes
+
+- 5fbe015: Rebase the fork onto upstream `wevm/incur` at `f617e17` (upstream 0.6.0).
+
+  Picks up filesystem command routing (`Cli.command()` / `cli.fs()`, sibling-file
+  inference), `sync: false` to opt out of generated skills, trusted-package
+  identity for generated MCP/skills commands, and the patched TOON dependency.
+
+  The fork's own deltas are unchanged: agent-safe execution controls, the OpenAPI
+  swagger2/runtime-metadata work, `sync.skills` inline options, the `--no-<flag>`
+  parser fix, generated plugins, `@0xbigboss` packaging, and `$HOME` isolation
+  for skills metadata in the test suite.
+
+### Patch Changes
+
+- f617e17: Require a patched TOON version to prevent prototype pollution when decoding untrusted input.
+
 ## 0.6.1
 
 ### Patch Changes
