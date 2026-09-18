@@ -303,12 +303,24 @@ export function create(
   const commands = new Map<string, CommandEntry>()
   const middlewares: MiddlewareHandler[] = []
   const pending: Promise<void>[] = []
-  const mcpHandler = createMcpHttpHandler(def.mcp?.name ?? name, version ?? '0.0.0', {
-    instructions: def.mcp?.instructions,
-    stateless: def.mcp?.stateless,
-    title: def.mcp?.title,
-    tools: def.mcp?.tools,
+  const mcpSource = isMcpSource(def.mcp) ? def.mcp : undefined
+  const mcpServer = mcpServerConfig(def.mcp)
+  const mcpHandler = createMcpHttpHandler(mcpServer?.name ?? name, version ?? '0.0.0', {
+    instructions: mcpServer?.instructions,
+    stateless: mcpServer?.stateless,
+    title: mcpServer?.title,
+    tools: mcpServer?.tools,
   })
+
+  if (mcpSource) {
+    pending.push(
+      (async () => {
+        const resolved = await McpSource.resolve(mcpSource)
+        const generated = McpSource.generateCommands(resolved)
+        for (const [toolName, command] of generated) commands.set(toolName, command as CommandEntry)
+      })(),
+    )
+  }
 
   if (def.openapi && rootFetch) {
     pending.push(
@@ -512,7 +524,7 @@ export function create(
         envSchema: def.env,
         format: def.format,
         globals: globalsDesc,
-        mcp: def.mcp,
+        mcp: def.mcp === false ? false : mcpServer,
         middlewares,
         outputPolicy: def.outputPolicy,
         package: def.package,
@@ -754,8 +766,16 @@ export declare namespace create {
           | Promise<InferReturn<output>>
           | AsyncGenerator<InferReturn<output>, unknown, unknown>)
       | undefined
-    /** Options for MCP integration. */
+    /**
+     * MCP integration.
+     *
+     * - A remote source (`string`, `URL`, or `{ url, headers?, fetch? }`) generates root commands from that server's tools.
+     * - An object without `url` configures this CLI's MCP server (`mcp add`, `--mcp`, HTTP `/mcp`).
+     * - `false` disables `--mcp`, `mcp add`, and their help (parallel to `sync: false`).
+     */
     mcp?:
+      | false
+      | McpSource.Source
       | {
           /** Target specific agents by default (e.g. `['claude-code', 'cursor']`). */
           agents?: string[] | undefined
@@ -891,10 +911,13 @@ async function serveImpl(
   const configFlag = options.config?.flag
   const displayName = resolveDisplayName(name, options.aliases)
   const skillsEnabled = options.sync !== false
+  const mcpEnabled = options.mcp !== false
+  const mcpServer = mcpServerConfig(options.mcp)
   const sync = options.sync === false ? undefined : options.sync
-  const builtins = skillsEnabled
-    ? builtinCommands
-    : builtinCommands.filter((command) => command.name !== 'skills')
+  const builtins = builtinCommands.filter(
+    (command) =>
+      (skillsEnabled || command.name !== 'skills') && (mcpEnabled || command.name !== 'mcp'),
+  )
 
   function writeln(s: string) {
     stdout(s.endsWith('\n') ? s : `${s}\n`)
@@ -1027,17 +1050,17 @@ async function serveImpl(
   }
 
   // --mcp: start as MCP stdio server
-  if (mcpFlag) {
+  if (mcpFlag && mcpEnabled) {
     try {
-      await Mcp.serve(options.mcp?.name ?? name, options.version ?? '0.0.0', commands, {
+      await Mcp.serve(mcpServer?.name ?? name, options.version ?? '0.0.0', commands, {
         middlewares: options.middlewares,
         env: options.envSchema,
         vars: options.vars,
         version: options.version,
         sanitize: options.sanitize,
-        ...(options.mcp?.instructions ? { instructions: options.mcp.instructions } : undefined),
-        ...(options.mcp?.title ? { title: options.mcp.title } : undefined),
-        ...(options.mcp?.tools ? { tools: options.mcp.tools } : undefined),
+        ...(mcpServer?.instructions ? { instructions: mcpServer.instructions } : undefined),
+        ...(mcpServer?.title ? { title: mcpServer.title } : undefined),
+        ...(mcpServer?.tools ? { tools: mcpServer.tools } : undefined),
       })
     } catch (err) {
       const code = err instanceof IncurError ? err.code : 'UNKNOWN'
@@ -1135,13 +1158,8 @@ async function serveImpl(
           // picked. Fall back to the default resolver if no metadata exists
           // (first run, or hash file cleared).
           const cwd =
-            SyncSkills.readIncludeCwd(name) ??
-            SyncSkills.resolveIncludeCwd({ cwd: sync?.cwd })
-          const includeShadowed = await SyncSkills.expandIncludeNames(
-            name,
-            sync?.include,
-            cwd,
-          )
+            SyncSkills.readIncludeCwd(name) ?? SyncSkills.resolveIncludeCwd({ cwd: sync?.cwd })
+          const includeShadowed = await SyncSkills.expandIncludeNames(name, sync?.include, cwd)
           const shadowed = new Set<string>([...generatedNames, ...includeShadowed])
           inlineForHash = inlineForHash.filter((s) => !shadowed.has(s.name))
         }
@@ -1411,7 +1429,7 @@ async function serveImpl(
   }
 
   // mcp add/doctor: register or smoke-test CLI MCP server integration.
-  const mcpIdx = builtinIdx(filtered, name, 'mcp')
+  const mcpIdx = mcpEnabled ? builtinIdx(filtered, name, 'mcp') : -1
   if (mcpIdx !== -1) {
     const builtin = findBuiltin('mcp')!
     const mcpSub = filtered[mcpIdx + 1]
@@ -1457,15 +1475,15 @@ async function serveImpl(
     const global = rest.includes('--no-global') ? false : true
 
     // Parse --command / -c and --agent flags from argv
-    let command = options.mcp?.command
-    const agents: string[] = [...(options.mcp?.agents ?? [])]
+    let command = mcpServer?.command
+    const agents: string[] = [...(mcpServer?.agents ?? [])]
     for (let i = 0; i < rest.length; i++) {
       if ((rest[i] === '--command' || rest[i] === '-c') && rest[i + 1]) command = rest[++i]!
       else if (rest[i] === '--agent' && rest[i + 1]) agents.push(rest[++i]!)
     }
 
     try {
-      const mcpName = options.mcp?.name ?? name
+      const mcpName = mcpServer?.name ?? name
       stdout('Registering MCP server...')
       const result = await SyncMcp.register(mcpName, {
         ...(mcpName === name ? undefined : { cli: name }),
@@ -1541,6 +1559,7 @@ async function serveImpl(
           usage: cmd.usage,
           commands: commands.size > 0 ? collectHelpCommands(commands) : undefined,
           hideSkills: !skillsEnabled,
+          hideMcp: !mcpEnabled,
           root: true,
         }),
       )
@@ -1559,6 +1578,7 @@ async function serveImpl(
           version: options.version,
           commands: collectHelpCommands(commands),
           hideSkills: !skillsEnabled,
+          hideMcp: !mcpEnabled,
           root: true,
         }),
       )
@@ -1594,6 +1614,7 @@ async function serveImpl(
           version: options.version,
           commands: collectHelpCommands(commands),
           hideSkills: !skillsEnabled,
+          hideMcp: !mcpEnabled,
           root: true,
         }),
       )
@@ -1629,6 +1650,7 @@ async function serveImpl(
             usage: cmd.usage,
             commands: collectHelpCommands(helpCmds),
             hideSkills: !skillsEnabled,
+            hideMcp: !mcpEnabled,
             root: true,
           }),
         )
@@ -1642,6 +1664,7 @@ async function serveImpl(
             version: isRoot ? options.version : undefined,
             commands: collectHelpCommands(helpCmds),
             hideSkills: !skillsEnabled,
+            hideMcp: !mcpEnabled,
             root: isRoot,
           }),
         )
@@ -1673,6 +1696,7 @@ async function serveImpl(
           usage: cmd.usage,
           commands: helpSubcommands,
           hideSkills: !skillsEnabled,
+          hideMcp: !mcpEnabled,
           root: isRootCmd,
         }),
       )
@@ -3085,6 +3109,7 @@ declare namespace serveImpl {
     /** Trusted npm package for generated commands. */
     package?: string | undefined
     mcp?:
+      | false
       | {
           agents?: string[] | undefined
           command?: string | undefined
@@ -3461,16 +3486,17 @@ async function runMcpDoctor(
   output.on('data', (chunk) => chunks.push(chunk.toString()))
 
   let serveError: unknown
-  const done = Mcp.serve(options.mcp?.name ?? name, options.version ?? '0.0.0', commands, {
+  const mcpServer = mcpServerConfig(options.mcp)
+  const done = Mcp.serve(mcpServer?.name ?? name, options.version ?? '0.0.0', commands, {
     input,
     output,
     middlewares: options.middlewares,
     env: options.envSchema,
     vars: options.vars,
     version: options.version,
-    ...(options.mcp?.instructions ? { instructions: options.mcp.instructions } : undefined),
-    ...(options.mcp?.title ? { title: options.mcp.title } : undefined),
-    tools: { ...options.mcp?.tools, discovery: 'direct' },
+    ...(mcpServer?.instructions ? { instructions: mcpServer.instructions } : undefined),
+    ...(mcpServer?.title ? { title: mcpServer.title } : undefined),
+    tools: { ...mcpServer?.tools, discovery: 'direct' },
   }).catch((error) => {
     serveError = error
   })
@@ -3748,15 +3774,34 @@ function isFetchSource(value: unknown): value is FetchSource {
   return typeof source.fetch === 'function' && source.url instanceof URL
 }
 
+type McpServerConfig = {
+  agents?: string[] | undefined
+  command?: string | undefined
+  instructions?: string | undefined
+  name?: string | undefined
+  stateless?: boolean | undefined
+  title?: string | undefined
+  tools?: Mcp.ToolFilter | undefined
+}
+
+function isMcpSource(value: unknown): value is McpSource.Source {
+  if (typeof value === 'string' || value instanceof URL) return true
+  return typeof value === 'object' && value !== null && 'url' in value
+}
+
+function mcpServerConfig(mcp: unknown): McpServerConfig | undefined {
+  if (mcp === false || mcp === undefined || isMcpSource(mcp)) return undefined
+  if (typeof mcp !== 'object' || mcp === null) return undefined
+  return mcp as McpServerConfig
+}
+
 function isMcpSourceDefinition(value: unknown): value is {
   description?: string | undefined
   mcp: McpSource.Source
   outputPolicy?: OutputPolicy | undefined
 } {
   if (typeof value !== 'object' || value === null || !('mcp' in value)) return false
-  const source = (value as { mcp?: unknown }).mcp
-  if (typeof source === 'string' || source instanceof URL) return true
-  return typeof source === 'object' && source !== null && 'url' in source
+  return isMcpSource((value as { mcp?: unknown }).mcp)
 }
 
 function resolveFetch(source: FetchSource): FetchHandler {

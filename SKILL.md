@@ -215,6 +215,25 @@ my-cli api --help                  # shows typed subcommands
 
 Works with any `(Request) => Response` handler — Hono, Elysia, etc. Specs from `@hono/zod-openapi` are supported directly.
 
+### MCP command sources
+
+Pass a remote MCP streamable-HTTP endpoint to generate commands from its tools. At create time, tools become root commands. With `.command(name, { mcp })`, they become a named group:
+
+```ts
+Cli.create('my-cli', { mcp: 'https://mcp.tempo.xyz/mcp' }).serve()
+
+Cli.create('my-cli', { description: 'My CLI' })
+  .command('docs', { mcp: 'https://mcp.tempo.xyz/mcp' })
+  .serve()
+```
+
+```sh
+my-cli search --query tempo        # root mount
+my-cli docs search --query tempo   # named group
+```
+
+Pass `mcp: false` to disable `--mcp`, `mcp add`, and their help.
+
 ### Serve CLI as Fetch API
 
 Expose your CLI as a standard Fetch API handler with `cli.fetch`. Works with Bun, Cloudflare Workers, Deno, Hono, and anything that accepts `(req: Request) => Response`.

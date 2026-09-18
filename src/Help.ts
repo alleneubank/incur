@@ -13,6 +13,7 @@ export function formatRoot(name: string, options: formatRoot.Options = {}): stri
     description,
     globals,
     hideSkills = false,
+    hideMcp = false,
     version,
     commands = [],
     root = false,
@@ -41,7 +42,7 @@ export function formatRoot(name: string, options: formatRoot.Options = {}): stri
     }
   }
 
-  lines.push(...globalOptionsLines(root, configFlag, globals, hideSkills))
+  lines.push(...globalOptionsLines(root, configFlag, globals, hideSkills, hideMcp))
 
   return lines.join('\n')
 }
@@ -60,6 +61,8 @@ export declare namespace formatRoot {
     globals?: GlobalsDescriptor | undefined
     /** Hide the built-in skills integration. */
     hideSkills?: boolean | undefined
+    /** Hide the built-in MCP server integration. */
+    hideMcp?: boolean | undefined
     /** Show root-level built-in commands and flags. */
     root?: boolean | undefined
     /** CLI version string. */
@@ -95,6 +98,8 @@ export declare namespace formatCommand {
     hideGlobalOptions?: boolean | undefined
     /** Hide the built-in skills integration. */
     hideSkills?: boolean | undefined
+    /** Hide the built-in MCP server integration. */
+    hideMcp?: boolean | undefined
     /** Zod schema for named options/flags. */
     options?: z.ZodObject<any> | undefined
     /** Show root-level built-in commands and flags. */
@@ -122,6 +127,7 @@ export function formatCommand(name: string, options: formatCommand.Options = {})
     description,
     globals,
     hideSkills = false,
+    hideMcp = false,
     version,
     args,
     env,
@@ -227,7 +233,7 @@ export function formatCommand(name: string, options: formatCommand.Options = {})
   }
 
   if (!options.hideGlobalOptions)
-    lines.push(...globalOptionsLines(root, configFlag, globals, hideSkills))
+    lines.push(...globalOptionsLines(root, configFlag, globals, hideSkills, hideMcp))
 
   // Environment Variables
   if (env) {
@@ -366,12 +372,13 @@ function globalOptionsLines(
   configFlag?: string,
   globals?: GlobalsDescriptor,
   hideSkills = false,
+  hideMcp = false,
 ): string[] {
   const lines: string[] = []
 
   if (root) {
     const builtins = builtinCommands
-      .filter((b) => !hideSkills || b.name !== 'skills')
+      .filter((b) => (!hideSkills || b.name !== 'skills') && (!hideMcp || b.name !== 'mcp'))
       .flatMap((b) => {
         if (!b.subcommands) return [{ name: b.name, desc: b.description }]
         if (b.subcommands.length === 1)
@@ -420,7 +427,7 @@ function globalOptionsLines(
     { flag: '--format <toon|json|yaml|md|jsonl>', desc: 'Output format' },
     { flag: '--help', desc: 'Show help' },
     { flag: '--llms, --llms-full', desc: 'Print LLM-readable manifest' },
-    ...(root ? [{ flag: '--mcp', desc: 'Start as MCP stdio server' }] : []),
+    ...(root && !hideMcp ? [{ flag: '--mcp', desc: 'Start as MCP stdio server' }] : []),
     ...(configFlag
       ? [{ flag: `--no-${configFlag}`, desc: 'Disable JSON option defaults for this run' }]
       : []),

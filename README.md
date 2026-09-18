@@ -407,10 +407,12 @@ When served with `cli.fetch`, the generated spec is available at `/openapi.json`
 
 #### MCP command sources
 
-Pass a remote MCP streamable-HTTP endpoint to generate a command group from its tools:
+Pass a remote MCP streamable-HTTP endpoint to generate commands from its tools. At create time, tools become root commands. With `.command(name, { mcp })`, they become a named group:
 
 ```ts
 import { Cli } from 'incur'
+
+Cli.create('my-cli', { mcp: 'https://mcp.tempo.xyz/mcp' }).serve()
 
 Cli.create('my-cli', { description: 'My CLI' })
   .command('docs', { mcp: 'https://mcp.tempo.xyz/mcp' })
@@ -418,6 +420,9 @@ Cli.create('my-cli', { description: 'My CLI' })
 ```
 
 ```sh
+$ my-cli search --query tempo
+# → results: ...
+
 $ my-cli docs --help
 # Commands:
 #   search  Search docs
@@ -426,7 +431,7 @@ $ my-cli docs search --query tempo
 # → results: ...
 ```
 
-Each MCP tool becomes a plain incur subcommand, so it is also available through `cli.fetch` and through incur's own MCP server as `<group>_<tool>`. Progressive remote catalogs are resolved automatically.
+Each MCP tool becomes a plain incur command, so it is also available through `cli.fetch` and through incur's own MCP server (as `<group>_<tool>` when grouped). Progressive remote catalogs are resolved automatically. Pass `mcp: false` to disable `--mcp`, `mcp add`, and their help.
 
 ### Serve CLIs as APIs
 
