@@ -1,4 +1,5 @@
 import { ParseError } from './Errors.js'
+import { isRecord } from './internal/helpers.js'
 
 /** A single segment in a filter path: either a string key or an array slice. */
 export type Segment = { key: string } | { start: number; end: number }
@@ -95,9 +96,13 @@ export function apply(data: unknown, paths: FilterPath[]): unknown {
   if (Array.isArray(data)) return data.map((item) => apply(item, paths))
 
   const result: Record<string, unknown> = {}
-  for (const path of paths) merge(result, data, path, 0)
+  const positions: Positions = new WeakMap()
+  for (const path of paths) merge(result, data, path, 0, positions)
   return result
 }
+
+/** Source index of each element of a filtered array, so later paths merge into the right element. */
+type Positions = WeakMap<unknown[], number[]>
 
 /** Returns warnings for filter paths that do not exist in a JSON Schema. */
 export function validate(paths: FilterPath[], schema: Record<string, unknown>): string[] {
@@ -111,6 +116,7 @@ function merge(
   data: unknown,
   segments: Segment[],
   index: number,
+  positions: Positions,
 ): void {
   if (index >= segments.length || typeof data !== 'object' || data === null) return
   const segment = segments[index]!
@@ -128,40 +134,78 @@ function merge(
     if ('start' in next) {
       // Next segment is a slice
       if (!Array.isArray(val)) return
-      const sliced = val.slice(next.start, next.end)
-      if (index + 2 >= segments.length) {
-        target[segment.key] = sliced
-        return
-      }
-      target[segment.key] = sliced.map((item) => {
-        const sub: Record<string, unknown> = {}
-        merge(sub, item, segments, index + 2)
-        return sub
-      })
+      const selection = { source: val, indices: sliceIndices(val.length, next) }
+      target[segment.key] = mergeItems(
+        target[segment.key],
+        selection,
+        segments,
+        index + 2,
+        positions,
+      )
       return
     }
 
     // Next segment is a key — recurse into nested object
     if (Array.isArray(val)) {
-      const existing = Array.isArray(target[segment.key]) ? (target[segment.key] as unknown[]) : []
-      target[segment.key] = val.map((item, itemIndex) => {
-        const sub =
-          existing[itemIndex] && typeof existing[itemIndex] === 'object'
-            ? { ...(existing[itemIndex] as Record<string, unknown>) }
-            : {}
-        merge(sub, item, segments, index + 1)
-        return sub
-      })
+      const selection = { source: val, indices: val.map((_, at) => at) }
+      target[segment.key] = mergeItems(
+        target[segment.key],
+        selection,
+        segments,
+        index + 1,
+        positions,
+      )
       return
     }
 
     if (typeof val !== 'object' || val === null) return
     if (!target[segment.key] || typeof target[segment.key] !== 'object') target[segment.key] = {}
-    merge(target[segment.key] as Record<string, unknown>, val, segments, index + 1)
+    merge(target[segment.key] as Record<string, unknown>, val, segments, index + 1, positions)
     return
   }
 
   // slice at root level — shouldn't happen in merge (merge starts from object keys)
+}
+
+/** Source indices `Array.prototype.slice(start, end)` would select. */
+function sliceIndices(length: number, slice: { start: number; end: number }): number[] {
+  const bound = (value: number) => Math.min(Math.max(value < 0 ? length + value : value, 0), length)
+  const from = bound(slice.start)
+  const to = bound(slice.end)
+  return Array.from({ length: Math.max(to - from, 0) }, (_, offset) => from + offset)
+}
+
+/**
+ * Filters the selected elements and merges them, by source index, with what earlier paths
+ * selected from the same array; a path that ends here selects whole elements.
+ */
+function mergeItems(
+  existing: unknown,
+  selection: { source: unknown[]; indices: number[] },
+  segments: Segment[],
+  index: number,
+  positions: Positions,
+): unknown[] {
+  const bySource = new Map<number, unknown>()
+  if (Array.isArray(existing)) {
+    const known = positions.get(existing)
+    existing.forEach((item, at) => bySource.set(known?.[at] ?? at, item))
+  }
+  for (const at of selection.indices) {
+    const item = selection.source[at]
+    if (index >= segments.length) {
+      bySource.set(at, item)
+      continue
+    }
+    const earlier = bySource.get(at)
+    const sub: Record<string, unknown> = isRecord(earlier) ? { ...earlier } : {}
+    merge(sub, item, segments, index, positions)
+    bySource.set(at, sub)
+  }
+  const order = [...bySource.keys()].toSorted((a, b) => a - b)
+  const merged = order.map((at) => bySource.get(at))
+  positions.set(merged, order)
+  return merged
 }
 
 function matchesSchema(schema: Record<string, unknown> | undefined, path: FilterPath): boolean {

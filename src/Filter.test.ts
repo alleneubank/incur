@@ -190,6 +190,39 @@ describe('apply', () => {
     })
   })
 
+  test('paths through the same slice merge their fields', () => {
+    const data = {
+      users: [
+        { name: 'alice', age: 30, role: 'admin' },
+        { name: 'bob', age: 25 },
+      ],
+    }
+    expect(Filter.apply(data, Filter.parse('users[0].name,users[0].age'))).toEqual({
+      users: [{ name: 'alice', age: 30 }],
+    })
+    expect(Filter.apply(data, Filter.parse('users[0,2].name,users[0,2].age'))).toEqual({
+      users: [
+        { name: 'alice', age: 30 },
+        { name: 'bob', age: 25 },
+      ],
+    })
+  })
+
+  test('paths through different elements keep each element separate', () => {
+    const data = {
+      users: [{ name: 'alice', age: 30 }, { name: 'bob', age: 25 }, { name: 'carol' }],
+    }
+    expect(Filter.apply(data, Filter.parse('users[1].age,users[0].name'))).toEqual({
+      users: [{ name: 'alice' }, { age: 25 }],
+    })
+    expect(Filter.apply(data, Filter.parse('users[0],users[-1]'))).toEqual({
+      users: [{ name: 'alice', age: 30 }, { name: 'carol' }],
+    })
+    expect(Filter.apply(data, Filter.parse('users[2].name,users.age'))).toEqual({
+      users: [{ age: 30 }, { age: 25 }, { name: 'carol' }],
+    })
+  })
+
   test('rejects a malformed slice instead of returning nothing', () => {
     for (const expression of ['items[x].id', 'items[0', 'items[1,2,3]', 'items[0.5]'])
       expect(() => Filter.parse(expression), expression).toThrow(
