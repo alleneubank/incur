@@ -7401,6 +7401,68 @@ test('mutating commands support --dry-run without invoking run', async () => {
   })
 })
 
+test('command help lists injected options such as --dry-run', async () => {
+  const cli = Cli.create('test').command('deploy', {
+    description: 'Deploy a target',
+    mutates: true,
+    args: z.object({ target: z.string().describe('Where to deploy') }),
+    options: z.object({ force: z.boolean().default(false).describe('Skip checks') }),
+    run: () => ({ ok: true }),
+  })
+
+  const { output } = await serve(cli, ['deploy', '--help'])
+  expect(output.slice(0, output.indexOf('\n\nGlobal Options:'))).toMatchInlineSnapshot(`
+    "test deploy — Deploy a target
+
+    Usage: test deploy <target> [options]
+
+    Arguments:
+      target  Where to deploy
+
+    Options:
+      --force    Skip checks
+      --dry-run  Validate inputs and print the resolved command context without executing"
+  `)
+})
+
+test('usage after a validation error lists injected options', async () => {
+  ;(process.stdout as any).isTTY = true
+  const cli = Cli.create('test').command('deploy', {
+    mutates: true,
+    args: z.object({ target: z.string().describe('Where to deploy') }),
+    run: () => ({ ok: true }),
+  })
+
+  const { output } = await serve(cli, ['deploy'])
+  ;(process.stdout as any).isTTY = false
+  expect(output).toMatchInlineSnapshot(`
+    "Error: missing required argument <target>
+    See below for usage.
+
+    test deploy
+
+    Usage: test deploy <target> [options]
+
+    Arguments:
+      target  Where to deploy
+
+    Options:
+      --dry-run  Validate inputs and print the resolved command context without executing
+
+    Global Options:
+      --filter-output <keys>              Filter output by key paths (e.g. foo,bar.baz,a[0,3])
+      --format <toon|json|yaml|md|jsonl>  Output format
+      --full-output                       Show full output envelope
+      --help                              Show help
+      --llms, --llms-full                 Print LLM-readable manifest
+      --schema                            Show JSON Schema for command
+      --token-count                       Print token count of output (instead of output)
+      --token-limit <n>                   Limit output to n tokens
+      --token-offset <n>                  Skip first n tokens of output
+    "
+  `)
+})
+
 test('commands with a user-declared dryRun option auto-advertise mutates in the manifest but keep runtime control in the handler', async () => {
   let called = false
   let seenDryRun: unknown
