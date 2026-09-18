@@ -61,7 +61,7 @@ function buildSignature(cli: string, cmd: CommandInfo): string {
     const label = properties?.[k]?.type === 'array' ? `${k}...` : k
     return required.has(k) ? `<${label}>` : `[${label}]`
   })
-  return `${base} ${argNames.join(' ')}`
+  return [base, ...argNames].join(' ')
 }
 
 /** Generates a Markdown skill file from a CLI name and collected command data. */
@@ -188,7 +188,7 @@ function renderCommandBody(cli: string, cmd: CommandInfo, level = 1): string {
   const sub = h(level + 1)
 
   // Arguments table
-  if (cmd.args) {
+  if (hasFields(cmd.args)) {
     const shape = cmd.args.shape as Record<string, z.ZodType>
     const json = Schema.toJsonSchema(cmd.args)
     const required = new Set((json.required as string[] | undefined) ?? [])
@@ -206,7 +206,7 @@ function renderCommandBody(cli: string, cmd: CommandInfo, level = 1): string {
   }
 
   // Environment Variables table
-  if (cmd.env) {
+  if (hasFields(cmd.env)) {
     const shape = cmd.env.shape as Record<string, z.ZodType>
     const json = Schema.toJsonSchema(cmd.env)
     const required = new Set((json.required as string[] | undefined) ?? [])
@@ -225,7 +225,7 @@ function renderCommandBody(cli: string, cmd: CommandInfo, level = 1): string {
   }
 
   // Options table
-  if (cmd.options) {
+  if (hasFields(cmd.options)) {
     const shape = cmd.options.shape as Record<string, z.ZodType>
     const json = Schema.toJsonSchema(cmd.options)
     const properties = json.properties as Record<string, Record<string, unknown>> | undefined
@@ -266,6 +266,11 @@ function renderCommandBody(cli: string, cmd: CommandInfo, level = 1): string {
   if (cmd.hint) sections.push(`> ${cmd.hint}`)
 
   return sections.join('\n\n')
+}
+
+/** @internal Whether an object schema declares at least one field. */
+function hasFields(schema: z.ZodObject<any> | undefined): schema is z.ZodObject<any> {
+  return schema !== undefined && Object.keys(schema.shape).length > 0
 }
 
 /**

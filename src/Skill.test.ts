@@ -178,6 +178,38 @@ describe('index', () => {
     `)
   })
 
+  test('a command with an empty args schema has no trailing space', () => {
+    const result = Skill.index('test', [
+      { name: 'ping', description: 'Health check', args: z.object({}) },
+    ])
+    expect(result).toMatchInlineSnapshot(`
+      "# test
+
+      | Command | Description |
+      |---------|-------------|
+      | \`test ping\` | Health check |
+
+      Run \`test --llms-full\` for full manifest. Run \`test <command> --schema\` for argument details."
+    `)
+  })
+
+  test('empty args, env, and options schemas render no tables in the full manifest', () => {
+    const result = Skill.generate('test', [
+      {
+        name: 'ping',
+        description: 'Health check',
+        args: z.object({}),
+        env: z.object({}),
+        options: z.object({}),
+      },
+    ])
+    expect(result).toMatchInlineSnapshot(`
+      "# test ping
+
+      Health check"
+    `)
+  })
+
   test('uses brackets for optional args', () => {
     const result = Skill.index('test', [
       {
