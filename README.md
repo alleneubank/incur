@@ -669,6 +669,20 @@ cli.command('deploy', {
 })
 ```
 
+`--help` lists each environment variable and whether it is set, showing a set value as `****` and its last 4 characters. Mark a credential with `.meta({ secret: true })` to show only that it is set:
+
+```ts
+env: z.object({
+  DEPLOY_TOKEN: z.string().describe('Deploy API token').meta({ secret: true }),
+}),
+```
+
+```sh
+$ my-cli deploy --help
+# Environment Variables:
+#   DEPLOY_TOKEN  Deploy API token (set)
+```
+
 ### Streaming
 
 Use `async *run` to stream chunks incrementally. Yield objects for structured data or plain strings for text:

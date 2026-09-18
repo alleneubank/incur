@@ -38,6 +38,30 @@ describe('redact: short secrets should not leak characters', () => {
   })
 })
 
+describe('secret env variables', () => {
+  test('show only that a secret is set, none of its characters', () => {
+    const output = Help.formatCommand('deploy', {
+      env: z.object({
+        DEPLOY_TOKEN: z.string().describe('API token').meta({ secret: true }),
+        SIGNING_KEY: z.string().meta({ secret: true }).optional().describe('Signing key'),
+        REGION: z.string().describe('Target region'),
+      }),
+      envSource: { DEPLOY_TOKEN: 'tok-1234-abcd', SIGNING_KEY: 'key-wxyz', REGION: 'us-east-1' },
+      hideGlobalOptions: true,
+    })
+    expect(output).toMatchInlineSnapshot(`
+      "deploy
+
+      Usage: deploy
+
+      Environment Variables:
+        DEPLOY_TOKEN  API token (set)
+        SIGNING_KEY   Signing key (set)
+        REGION        Target region (set: ****st-1)"
+    `)
+  })
+})
+
 describe('formatCommand', () => {
   test('formats leaf command with args and options', () => {
     const result = Help.formatCommand('gh pr list', {

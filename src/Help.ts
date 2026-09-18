@@ -246,7 +246,8 @@ export function formatCommand(name: string, options: formatCommand.Options = {})
         const padding = ' '.repeat(maxLen - entry.name.length)
         const parts: string[] = [entry.description]
         const source = envSource ?? defaultEnvSource()
-        if (entry.name in source) parts.push(`set: ${redact(source[entry.name]!)}`)
+        if (entry.name in source)
+          parts.push(entry.secret ? 'set' : `set: ${redact(source[entry.name]!)}`)
         if (entry.defaultValue !== undefined) parts.push(`default: ${entry.defaultValue}`)
         const desc = parts.length > 1 ? `${parts[0]} (${parts.slice(1).join(', ')})` : parts[0]
         lines.push(`  ${entry.name}${padding}  ${desc}`)
@@ -279,10 +280,16 @@ function argsEntries(schema: z.ZodObject<any>) {
 
 /** Extracts env var entries from a Zod object schema. */
 function envEntries(schema: z.ZodObject<any>) {
-  const entries: { name: string; description: string; defaultValue?: unknown }[] = []
+  const entries: { name: string; description: string; defaultValue?: unknown; secret: boolean }[] =
+    []
   for (const [key, field] of Object.entries(schema.shape)) {
     const defaultValue = extractDefault(field)
-    entries.push({ name: key, description: (field as any).description ?? '', defaultValue })
+    entries.push({
+      name: key,
+      description: (field as any).description ?? '',
+      defaultValue,
+      secret: isSecret(field),
+    })
   }
   return entries
 }
@@ -358,6 +365,12 @@ function extractDefault(schema: unknown): unknown {
   }
   if (schema instanceof z.ZodOptional) return extractDefault(schema.unwrap())
   return undefined
+}
+
+/** Checks if an env schema is marked `.meta({ secret: true })`, on itself or its optional/default/nullable inner type. */
+function isSecret(schema: unknown): boolean {
+  const meta = (s: unknown) => (s as any)?.meta?.()
+  return meta(schema)?.secret === true || meta(unwrap(schema))?.secret === true
 }
 
 /** Reads the `deprecated` flag from a Zod schema's `.meta()`. */
