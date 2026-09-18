@@ -28,12 +28,24 @@ export function format(value: unknown, fmt: Format = 'toon'): string {
   }
   // toon (default)
   if (isScalar(value)) return String(value)
+  const block = multilineStringField(value)
+  if (block !== undefined) return block
   return encode(value as Record<string, unknown>)
 }
 
 /** Whether a value is a scalar (string, number, boolean, null, undefined). */
 function isScalar(value: unknown): boolean {
   return value === null || value === undefined || typeof value !== 'object'
+}
+
+/** A one-field object whose value is a multiline string prints as that string. */
+function multilineStringField(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const keys = Object.keys(value)
+  if (keys.length !== 1) return undefined
+  const field = (value as Record<string, unknown>)[keys[0]!]
+  if (typeof field !== 'string' || !field.includes('\n')) return undefined
+  return field
 }
 
 /** Whether all values in an object are scalars. */

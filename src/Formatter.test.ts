@@ -53,6 +53,13 @@ describe('format', () => {
     expect(result).toMatchInlineSnapshot(`"message: hello"`)
   })
 
+  test('prints a multiline result string as text instead of a quoted TOON field', () => {
+    const result = Formatter.format({
+      result: 'User ID: U1\nUsername: allen\n',
+    })
+    expect(result).toBe('User ID: U1\nUsername: allen\n')
+  })
+
   test('formats as JSON', () => {
     const result = Formatter.format({ message: 'hello' }, 'json')
     expect(result).toMatchInlineSnapshot(`
