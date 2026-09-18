@@ -1,3 +1,5 @@
+import { ParseError } from './Errors.js'
+
 /** A single segment in a filter path: either a string key or an array slice. */
 export type Segment = { key: string } | { start: number; end: number }
 
@@ -41,11 +43,9 @@ export function parse(expression: string): FilterPath[] {
       const before = remaining.slice(0, bracketIdx)
       for (const part of before.split('.')) if (part) path.push({ key: part })
 
-      // Parse the slice [start,end]
       const closeBracket = remaining.indexOf(']', bracketIdx)
-      const inner = remaining.slice(bracketIdx + 1, closeBracket)
-      const [startStr, endStr] = inner.split(',')
-      path.push({ start: Number(startStr), end: Number(endStr) })
+      if (closeBracket === -1) throw invalidPath(token)
+      path.push(parseSlice(remaining.slice(bracketIdx + 1, closeBracket), token))
 
       remaining = remaining.slice(closeBracket + 1)
       if (remaining.startsWith('.')) remaining = remaining.slice(1)
@@ -55,6 +55,25 @@ export function parse(expression: string): FilterPath[] {
   }
 
   return paths
+}
+
+const integer = /^-?\d+$/
+
+/** Parses the inside of `[...]`: `[]` every element, `[n]` one element, `[start,end]` a slice. */
+function parseSlice(inner: string, token: string): Segment {
+  if (inner === '') return { start: 0, end: Infinity }
+  const bounds = inner.split(',')
+  if (bounds.length > 2 || !bounds.every((bound) => integer.test(bound))) throw invalidPath(token)
+  const start = Number(bounds[0])
+  if (bounds.length === 2) return { start, end: Number(bounds[1]) }
+  // `[-1]` is the last element; `slice(-1, 0)` would be empty.
+  return { start, end: start === -1 ? Infinity : start + 1 }
+}
+
+function invalidPath(token: string): ParseError {
+  return new ParseError({
+    message: `Invalid --filter-output path "${token}": use key.sub, key[n], key[start,end], or key[]`,
+  })
 }
 
 /** Applies parsed filter paths to a data value, returning a filtered copy. */
@@ -192,7 +211,14 @@ function walkSchema(
 
 function formatPath(path: FilterPath): string {
   return path
-    .map((segment) => ('key' in segment ? segment.key : `[${segment.start},${segment.end}]`))
+    .map((segment) => ('key' in segment ? segment.key : formatSlice(segment)))
     .join('.')
     .replace('.[', '[')
+}
+
+function formatSlice(slice: { start: number; end: number }): string {
+  if (slice.start === 0 && slice.end === Infinity) return '[]'
+  if (slice.end === slice.start + 1 || (slice.start === -1 && slice.end === Infinity))
+    return `[${slice.start}]`
+  return `[${slice.start},${slice.end}]`
 }

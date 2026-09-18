@@ -181,6 +181,22 @@ describe('apply', () => {
     `)
   })
 
+  test('[n] selects one element, [-1] the last, and [] every element', () => {
+    const data = { channels: [{ id: 'a', name: 'x' }, { id: 'b', name: 'y' }, { id: 'c' }] }
+    expect(Filter.apply(data, Filter.parse('channels[0].id'))).toEqual({ channels: [{ id: 'a' }] })
+    expect(Filter.apply(data, Filter.parse('channels[-1].id'))).toEqual({ channels: [{ id: 'c' }] })
+    expect(Filter.apply(data, Filter.parse('channels[].id'))).toEqual({
+      channels: [{ id: 'a' }, { id: 'b' }, { id: 'c' }],
+    })
+  })
+
+  test('rejects a malformed slice instead of returning nothing', () => {
+    for (const expression of ['items[x].id', 'items[0', 'items[1,2,3]', 'items[0.5]'])
+      expect(() => Filter.parse(expression), expression).toThrow(
+        expect.objectContaining({ name: 'Incur.ParseError' }),
+      )
+  })
+
   test('multiple filter paths merged', () => {
     const data = { name: 'alice', age: 30, email: 'alice@example.com' }
     expect(Filter.apply(data, Filter.parse('name,age'))).toMatchInlineSnapshot(`

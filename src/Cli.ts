@@ -3268,6 +3268,8 @@ function extractBuiltinFlags(argv: string[], options: extractBuiltinFlags.Option
       configDisabled = true
     } else if ((token === '--filter-output' || token === '--fields') && argv[i + 1]) {
       filterOutput = argv[i + 1]!
+      // Reports a malformed path as a flag error before the command runs.
+      Filter.parse(filterOutput)
       i++
     } else if (token === '--token-limit' && argv[i + 1]) {
       const n = Number(argv[i + 1])

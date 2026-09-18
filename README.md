@@ -1085,7 +1085,7 @@ Use `incur gen` to auto-generate a `config.schema.json` to distribute with your 
 
 ### Filtering output
 
-Use `--filter-output` to prune command output to specific keys. Supports dot-notation for nested keys, array slices, and comma-separated paths:
+Use `--filter-output` to prune command output to specific keys. Supports dot-notation for nested keys, array slices (`[start,end]`, one element `[n]` with `[-1]` the last, every element `[]`), and comma-separated paths. A malformed path is an error:
 
 ```ts
 cli.command('users', {

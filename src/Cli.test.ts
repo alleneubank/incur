@@ -5229,6 +5229,20 @@ describe('fetch', async () => {
 })
 
 describe('--filter-output', () => {
+  test('a malformed slice is a flag error', async () => {
+    const cli = Cli.create('test')
+    cli.command('list', {
+      run() {
+        return { items: [1, 2, 3] }
+      },
+    })
+
+    const { output, exitCode } = await serve(cli, ['list', '--filter-output', 'items[x]'])
+    expect(exitCode).toBe(1)
+    expect(output).toContain('Invalid --filter-output path')
+    expect(output).toContain('items[x]')
+  })
+
   test('selects specific keys', async () => {
     const cli = Cli.create('test')
     cli.command('user', {

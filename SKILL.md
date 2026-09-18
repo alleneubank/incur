@@ -458,7 +458,7 @@ Without `--full-output`, only `data` is emitted. On errors, only the `error` blo
 
 ### Filtering output
 
-Use `--filter-output` to prune command output to specific keys. Supports dot-notation for nested access, array slices with `[start,end]`, and comma-separated paths:
+Use `--filter-output` to prune command output to specific keys. Supports dot-notation for nested access, array slices (`[start,end]`, one element `[n]` with `[-1]` the last, every element `[]`), and comma-separated paths. A malformed path is an error:
 
 ```ts
 cli.command('users', {
