@@ -897,6 +897,15 @@ export declare namespace serve {
   }
 }
 
+/**
+ * @internal A reader that stops early (`cli … | head -1`) closes stdout mid-write. That is its choice,
+ * not a failure, so the CLI exits quietly instead of crashing on an unhandled EPIPE.
+ */
+function exitOnClosedStdout(error: NodeJS.ErrnoException) {
+  if (error.code !== 'EPIPE') throw error
+  process.exit(0)
+}
+
 /** @internal Shared serve implementation for both router and leaf CLIs. */
 // biome-ignore lint/correctness/noUnusedVariables: _
 async function serveImpl(
@@ -908,6 +917,11 @@ async function serveImpl(
   const stdout = options.stdout ?? ((s: string) => process.stdout.write(s))
   const stderr = options.stderr ?? ((s: string) => process.stderr.write(s))
   const exit = options.exit ?? ((code: number) => process.exit(code))
+  if (
+    options.stdout === undefined &&
+    !process.stdout.listeners('error').includes(exitOnClosedStdout)
+  )
+    process.stdout.on('error', exitOnClosedStdout)
   const tty = process.stdout.isTTY === true
   let human = tty
   const configEnabled = options.config !== undefined
