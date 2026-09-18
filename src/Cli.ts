@@ -305,12 +305,15 @@ export function create(
   const pending: Promise<void>[] = []
   const mcpSource = isMcpSource(def.mcp) ? def.mcp : undefined
   const mcpServer = mcpServerConfig(def.mcp)
-  const mcpHandler = createMcpHttpHandler(mcpServer?.name ?? name, version ?? '0.0.0', {
-    instructions: mcpServer?.instructions,
-    stateless: mcpServer?.stateless,
-    title: mcpServer?.title,
-    tools: mcpServer?.tools,
-  })
+  const mcpServerEnabled = !mcpServerDisabled(def.mcp)
+  const mcpHandler = mcpServerEnabled
+    ? createMcpHttpHandler(mcpServer?.name ?? name, version ?? '0.0.0', {
+        instructions: mcpServer?.instructions,
+        stateless: mcpServer?.stateless,
+        title: mcpServer?.title,
+        tools: mcpServer?.tools,
+      })
+    : undefined
 
   if (mcpSource) {
     pending.push(
@@ -524,7 +527,7 @@ export function create(
         envSchema: def.env,
         format: def.format,
         globals: globalsDesc,
-        mcp: def.mcp === false ? false : mcpServer,
+        mcp: mcpServerEnabled ? mcpServer : false,
         middlewares,
         outputPolicy: def.outputPolicy,
         package: def.package,
@@ -769,7 +772,7 @@ export declare namespace create {
     /**
      * MCP integration.
      *
-     * - A remote source (`string`, `URL`, or `{ url, headers?, fetch? }`) generates root commands from that server's tools.
+     * - A remote source (`string`, `URL`, or `{ url, headers?, fetch?, server? }`) generates root commands from that server's tools. Set `server: false` on the source to omit this CLI's `--mcp` / `mcp add` / HTTP `/mcp`.
      * - An object without `url` configures this CLI's MCP server (`mcp add`, `--mcp`, HTTP `/mcp`).
      * - `false` disables `--mcp`, `mcp add`, and their help (parallel to `sync: false`).
      */
@@ -3787,6 +3790,12 @@ type McpServerConfig = {
 function isMcpSource(value: unknown): value is McpSource.Source {
   if (typeof value === 'string' || value instanceof URL) return true
   return typeof value === 'object' && value !== null && 'url' in value
+}
+
+function mcpServerDisabled(mcp: unknown): boolean {
+  if (mcp === false) return true
+  if (typeof mcp !== 'object' || mcp === null || !('url' in mcp)) return false
+  return (mcp as { server?: unknown }).server === false
 }
 
 function mcpServerConfig(mcp: unknown): McpServerConfig | undefined {

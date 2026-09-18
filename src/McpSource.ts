@@ -17,6 +17,8 @@ export type Source =
       headers?: HeadersInit | undefined
       /** Fetch handler used for MCP requests. Defaults to `globalThis.fetch`. */
       fetch?: Fetch.Handler | undefined
+      /** Set to `false` to omit this CLI's `--mcp` / `mcp add` / HTTP `/mcp`. */
+      server?: false | undefined
     }
 
 /** A resolved remote MCP server. */

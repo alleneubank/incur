@@ -64,6 +64,27 @@ describe('remote MCP command sources', () => {
     })
   })
 
+  test('root source with server false mounts tools and omits MCP builtins', async () => {
+    const remote = createRemoteCli()
+    const cli = Cli.create('local', {
+      mcp: {
+        url: new URL('http://mcp.local/mcp'),
+        fetch: (request) => remote.fetch(request),
+        server: false,
+      },
+    })
+
+    const result = await serve(cli, ['search', '--query', 'x', '--json'])
+    expect({ exitCode: result.exitCode, body: json(result.output) }).toEqual({
+      body: { query: 'x' },
+      exitCode: undefined,
+    })
+
+    const help = await serve(cli, ['--help'])
+    expect(help.output).not.toContain('Register as MCP server')
+    expect(help.output).not.toContain('--mcp')
+  })
+
   test('mcp false omits MCP builtins', async () => {
     const cli = Cli.create('local', { mcp: false })
     cli.command('ping', { run: () => ({ pong: true }) })
