@@ -1,5 +1,28 @@
 # incur
 
+## 0.8.0
+
+### Minor Changes
+
+- 131c5b6: Mount a remote MCP server as root commands via `Cli.create(name, { mcp })`, and pass `mcp: false` to disable `--mcp`, `mcp add`, and their help.
+
+### Patch Changes
+
+- baf4ffb: Resolve agent skill directories from `HOME`, `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR`, and `CODEX_HOME` on every `skills add`/sync call instead of once at import, so a home directory set after import (as in-process tests do) is honored instead of writing to the real one.
+- 53501b2: `--filter-output` accepts `key[n]` (one element, `[-1]` the last) and `key[]` (every element) alongside `key[start,end]`. A malformed path is a flag error instead of an empty result.
+- 444ee6e: `--filter-output` paths through the same array merge per element: `users[0].name,users[0].age` keeps both fields (the second path used to replace the first), and `users[1].age,users[0].name` keeps the two users separate.
+- d3bfa62: `--filter-output` no longer warns `Unknown field` for keys an output schema allows without declaring them: loose objects, records, catchalls, and unconstrained values such as `z.unknown()`. Objects closed with `additionalProperties: false` (plain `z.object`) still warn.
+- 2319624: Command `--help`, and the usage printed after a validation error, list the framework-injected options (`--dry-run` for mutating commands, `--json` for commands with a payload, `--page-size` for paginated commands). `--schema` already listed them.
+- dbf909d: Commands with an empty `args` schema no longer get a trailing space in the `--llms` command table. In `--llms-full` and generated skills, empty `args`, `env`, and `options` schemas no longer render header-only tables.
+- d8f341a: `--token-count` with `--llms` or `--llms-full` prints the manifest's token count instead of the manifest, in every format.
+- 61a6cef: Allow a remote MCP source object to set `server: false`, omitting `--mcp`, `mcp add`, and HTTP `/mcp` while still generating root commands from that server.
+- 0f0b00b: A positional argument the command does not declare is a parse error (`Unexpected positional argument 2; this command takes 1: <channel>`) instead of being dropped; the value is not echoed. A boolean flag followed by `true` or `false` takes that value, so `--dry false` is false.
+- ee3865a: Plugin-mounted commands are checked for option and alias collisions with the CLI's global options, like commands mounted any other way. A collision fails at startup with `Command '<path>' option '<key>' conflicts with a global option`, where before the command ran and the global silently won.
+- 8014f4a: List the environment variables declared with `Cli.create(name, { env })` in root `--help`, with secret values shown only as `(set)`.
+- a496ce5: Add `.meta({ secret: true })` for `env` schema fields. `--help` then shows only that the variable is set, instead of `****` and its last 4 characters.
+- 0523db0: Exit quietly with code 0 when stdout closes before the CLI finishes writing (`cli … | head -1`), instead of crashing with an unhandled `EPIPE` error event.
+- a3d04c7: Print a one-field object whose value is a multiline string as that text in TOON output, instead of a quoted `result: \"…\\n…\"` field.
+
 ## 0.7.0
 
 ### Minor Changes
