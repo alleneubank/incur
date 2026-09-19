@@ -1,5 +1,12 @@
 # incur
 
+## 0.8.1
+
+### Patch Changes
+
+- eabdb8f: `sync.include` installs the files beside an included `SKILL.md` (references, scripts, assets), so a hand-written skill can keep `SKILL.md` short and load the rest on demand. Nested `SKILL.md` files and symlinks are not copied.
+- 5e4adc3: An unknown `--<name>` flag that matches a positional argument says so (`Unknown flag: --channel; channel is positional: <channel> <ts>`) instead of only `Unknown flag: --channel`.
+
 ## 0.8.0
 
 ### Minor Changes
