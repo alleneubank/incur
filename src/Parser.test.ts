@@ -142,6 +142,24 @@ describe('parse', () => {
     expect(parse).not.toThrow(/wxyz/)
   })
 
+  test.each([['--channel', 'C123'], ['--channel=C123']])(
+    'an unknown flag named like a positional says it is positional (%s)',
+    (...argv) => {
+      const parse = () =>
+        Parser.parse(argv, {
+          args: z.object({ channel: z.string(), ts: z.string() }),
+          options: z.object({ text: z.string().optional() }),
+        })
+      expect(parse).toThrow(
+        expect.objectContaining({
+          name: 'Incur.ParseError',
+          message: 'Unknown flag: --channel; channel is positional: <channel> <ts>',
+        }),
+      )
+      expect(parse).not.toThrow(/C123/)
+    },
+  )
+
   test('throws ParseError for a positional when the command takes none', () => {
     expect(() =>
       Parser.parse(['U123'], { options: z.object({ user: z.string().optional() }) }),

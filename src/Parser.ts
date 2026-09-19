@@ -5,6 +5,24 @@ import { ParseError, ValidationError } from './Errors.js'
 import { allowsControlChars, hasControlChars } from './hardened.js'
 import { isRecord, toKebab } from './internal/helpers.js'
 
+/** `<a> <b>` for positional keys, as help's usage line shows them. */
+function positionalUsage(argKeys: readonly string[]): string {
+  return argKeys.map((key) => `<${key}>`).join(' ')
+}
+
+/** Error for an unregistered `--<name>`; names the positional when `name` is one. */
+function unknownFlagError(
+  flag: string,
+  name: string,
+  argsSchema: z.ZodObject<any> | undefined,
+): ParseError {
+  const argKeys = argsSchema ? Object.keys(argsSchema.shape) : []
+  if (!argKeys.includes(name)) return new ParseError({ message: `Unknown flag: ${flag}` })
+  return new ParseError({
+    message: `Unknown flag: ${flag}; ${name} is positional: ${positionalUsage(argKeys)}`,
+  })
+}
+
 /** Parses raw argv tokens against Zod schemas for args and options. */
 export function parse<
   const args extends z.ZodObject<any> | undefined = undefined,
@@ -44,13 +62,13 @@ export function parse<
         // --flag=value
         const raw = token.slice(2, eqIdx)
         const name = normalizeOptionName(raw, optionNames)
-        if (!name) throw new ParseError({ message: `Unknown flag: --${raw}` })
+        if (!name) throw unknownFlagError(`--${raw}`, raw, argsSchema)
         setOption(rawArgvOptions, name, token.slice(eqIdx + 1), optionsSchema)
         i++
       } else {
         // --flag [value]
         const name = normalizeOptionName(token.slice(2), optionNames)
-        if (!name) throw new ParseError({ message: `Unknown flag: ${token}` })
+        if (!name) throw unknownFlagError(token, token.slice(2), argsSchema)
         if (isCountOption(name, optionsSchema)) {
           rawArgvOptions[name] = ((rawArgvOptions[name] as number) ?? 0) + 1
           i++
@@ -118,7 +136,7 @@ export function parse<
     const takes =
       argKeys.length === 0
         ? 'none (pass values as --flags)'
-        : `${argKeys.length}: ${argKeys.map((key) => `<${key}>`).join(' ')}`
+        : `${argKeys.length}: ${positionalUsage(argKeys)}`
     throw new ParseError({
       message: `Unexpected positional argument ${argKeys.length + 1}; this command takes ${takes}`,
     })
