@@ -112,11 +112,15 @@ export declare namespace ValidationError {
 }
 
 /** Error thrown when argument parsing fails (unknown flags, missing values). */
-export class ParseError extends BaseError {
+export class ParseError extends IncurError {
   override name = 'Incur.ParseError'
 
   constructor(options: ParseError.Options) {
-    super(options.message, options.cause ? { cause: options.cause } : undefined)
+    super({
+      code: 'INVALID_ARGUMENT',
+      message: options.message,
+      ...(options.cause ? { cause: options.cause } : undefined),
+    })
   }
 }
 

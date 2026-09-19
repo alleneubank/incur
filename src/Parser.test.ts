@@ -153,6 +153,7 @@ describe('parse', () => {
       expect(parse).toThrow(
         expect.objectContaining({
           name: 'Incur.ParseError',
+          code: 'INVALID_ARGUMENT',
           message: 'Unknown flag: --channel; channel is positional: <channel> <ts>',
         }),
       )

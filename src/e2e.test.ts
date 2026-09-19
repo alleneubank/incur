@@ -241,8 +241,9 @@ describe('args and options', () => {
     const { output, exitCode } = await serve(createApp(), ['ping', '--unknown-flag'])
     expect(exitCode).toBe(1)
     expect(output).toMatchInlineSnapshot(`
-      "code: UNKNOWN
+      "code: INVALID_ARGUMENT
       message: "Unknown flag: --unknown-flag"
+      retryable: false
       "
     `)
   })
@@ -253,7 +254,7 @@ describe('args and options', () => {
     ;(process.stdout as any).isTTY = false
     expect(exitCode).toBe(1)
     expect(output).toMatchInlineSnapshot(`
-      "Error: Unknown flag: --unknown-flag
+      "Error (INVALID_ARGUMENT): Unknown flag: --unknown-flag
       "
     `)
   })

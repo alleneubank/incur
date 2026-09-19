@@ -1129,6 +1129,18 @@ describe('serve', () => {
     `)
   })
 
+  test('argument parser errors have a machine-readable code', async () => {
+    const cli = Cli.create('test')
+    cli.command('ping', { run: () => ({ ok: true }) })
+
+    const { output, exitCode } = await serve(cli, ['ping', '--unknown', '--format', 'json'])
+    expect(exitCode).toBe(1)
+    expect(JSON.parse(output)).toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      message: 'Unknown flag: --unknown',
+    })
+  })
+
   test('wraps handler errors in error output', async () => {
     const cli = Cli.create('test')
     cli.command('fail', {
