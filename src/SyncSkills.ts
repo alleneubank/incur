@@ -74,6 +74,22 @@ function assertSafeSkillName(name: string, prefix: string): void {
   if (!isSafeSkillName(name)) throw new Error(`${prefix} ${JSON.stringify(name)}`)
 }
 
+/**
+ * Copies the files beside an included SKILL.md (references, scripts, assets)
+ * into its staged directory, so a skill can keep SKILL.md short and load the
+ * rest on demand. Skips every SKILL.md (the staged one is written separately;
+ * nested ones would install as extra skills) and symlinks, which could point
+ * outside the skill. Callers never pass the include root itself, which holds
+ * the whole package.
+ */
+async function copySkillFiles(source: string, destination: string): Promise<void> {
+  await fs.cp(source, destination, {
+    recursive: true,
+    filter: async (file) =>
+      path.basename(file) !== 'SKILL.md' && !(await fs.lstat(file)).isSymbolicLink(),
+  })
+}
+
 /** Generates skill files from a command map and installs them natively. */
 export async function sync(
   name: string,
@@ -167,6 +183,8 @@ export async function sync(
           const destResolved = path.resolve(dest)
           if (!destResolved.startsWith(tmpDirResolved + path.sep))
             throw new Error(`sync.include: skill name ${JSON.stringify(skillName)} escapes tmp dir`)
+          const source = path.dirname(path.resolve(cwd, match))
+          if (source !== path.resolve(cwd)) await copySkillFiles(source, path.dirname(dest))
           try {
             await fs.mkdir(path.dirname(dest), { recursive: true })
             await fs.writeFile(dest, content)

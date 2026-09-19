@@ -1,7 +1,15 @@
 import { Cli, SyncSkills, z } from 'incur'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 
 let savedXdg: string | undefined
 let scratchXdg: string | undefined
@@ -263,6 +271,48 @@ description: Stale baked content.
   const sharedPath = result.paths.find((p) => p.endsWith('shared-skill'))
   expect(sharedPath).toBeDefined()
   expect(readFileSync(join(sharedPath!, 'SKILL.md'), 'utf8')).toBe(freshContent)
+
+  rmSync(tmp, { recursive: true, force: true })
+})
+
+test('sync.include installs the files a skill references, not nested skills or symlinks', async () => {
+  // A hand-written skill keeps SKILL.md short and links reference files it
+  // loads on demand (progressive disclosure); those files must install with it.
+  const tmp = mkdtempSync(join(tmpdir(), 'incur-include-files-'))
+  const cli = Cli.create('files-tool', { description: 'Include files test' })
+  cli.command('ping', { description: 'Health check', run: () => ({}) })
+
+  const installDir = join(tmp, 'install')
+  mkdirSync(join(installDir, '.agents', 'skills'), { recursive: true })
+  const skillDir = join(installDir, 'skills', 'guide')
+  mkdirSync(join(skillDir, 'references'), { recursive: true })
+  mkdirSync(join(skillDir, 'nested'), { recursive: true })
+  writeFileSync(
+    join(skillDir, 'SKILL.md'),
+    '---\nname: guide\ndescription: Guide.\n---\n\nSee references/upload.md.\n',
+  )
+  writeFileSync(join(skillDir, 'references', 'upload.md'), '# Upload\n')
+  writeFileSync(
+    join(skillDir, 'nested', 'SKILL.md'),
+    '---\nname: nested\ndescription: Not a separate skill.\n---\n',
+  )
+  const outside = join(tmp, 'outside.txt')
+  writeFileSync(outside, 'outside the skill\n')
+  symlinkSync(outside, join(skillDir, 'references', 'outside.txt'))
+
+  const result = await SyncSkills.sync('files-tool', Cli.toCommands.get(cli)!, {
+    global: false,
+    cwd: installDir,
+    include: ['skills/*'],
+  })
+
+  expect(result.skills.map((s) => s.name)).toContain('guide')
+  expect(result.skills.map((s) => s.name)).not.toContain('nested')
+  const installed = result.paths.find((p) => p.endsWith(`${sep}guide`))
+  expect(installed).toBeDefined()
+  expect(readFileSync(join(installed!, 'references', 'upload.md'), 'utf8')).toBe('# Upload\n')
+  expect(existsSync(join(installed!, 'nested', 'SKILL.md'))).toBe(false)
+  expect(existsSync(join(installed!, 'references', 'outside.txt'))).toBe(false)
 
   rmSync(tmp, { recursive: true, force: true })
 })
