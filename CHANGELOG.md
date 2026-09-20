@@ -1,5 +1,11 @@
 # incur
 
+## 0.8.2
+
+### Patch Changes
+
+- a0c90a4: Report command-line parser failures with the machine-readable `INVALID_ARGUMENT` code.
+
 ## 0.8.1
 
 ### Patch Changes
@@ -66,6 +72,7 @@
   Picks up 18 upstream patch releases (upstream 0.4.9 through 0.4.26) beneath the
   fork's own commits. Two fork patches were dropped as superseded — upstream fixed
   both independently:
+
   - The MCP `@modelcontextprotocol/server` prerelease drift. Upstream now pins the
     exact version `2.0.0-alpha.4`, which is what this fork resolves to.
   - Non-object MCP output schemas, and the JSON-Schema-vs-Standard-Schema mismatch
@@ -132,10 +139,12 @@
 - 5f41256: Sync the fork with upstream `wevm/incur` v0.4.8 and re-reconcile the fork's value-add on top of the new base.
 
   Breaking changes:
+
   - The global `--verbose` flag is renamed to `--full-output` (upstream wevm/incur#128).
   - MCP server migrated from `@modelcontextprotocol/sdk` to `@modelcontextprotocol/server` (upstream wevm/incur#117).
 
   Fork features retained and rebased onto the new upstream:
+
   - Agent-safe CLI execution controls.
   - Hardened string/path schemas and output sanitization.
   - Generated plugin system (Connect RPC + GraphQL).
