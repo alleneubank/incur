@@ -111,7 +111,10 @@ export declare namespace ValidationError {
   }
 }
 
-/** Error thrown when argument parsing fails (unknown flags, missing values). */
+/**
+ * Error thrown when argument parsing fails (unknown flags, missing values).
+ * Reports `INVALID_ARGUMENT` and is not retryable.
+ */
 export class ParseError extends IncurError {
   override name = 'Incur.ParseError'
 

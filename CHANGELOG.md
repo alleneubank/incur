@@ -1,5 +1,11 @@
 # incur
 
+## 0.8.2
+
+### Patch Changes
+
+- a0c90a4: Report command-line parser failures as non-retryable `INVALID_ARGUMENT` errors instead of `UNKNOWN`. Structured output now includes `retryable: false`, and human-readable output prefixes the message with `Error (INVALID_ARGUMENT):`.
+
 ## 0.8.1
 
 ### Patch Changes

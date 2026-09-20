@@ -91,10 +91,14 @@ describe('ValidationError', () => {
 })
 
 describe('ParseError', () => {
-  test('sets name', () => {
+  test('reports a non-retryable invalid argument', () => {
     const error = new Errors.ParseError({ message: 'Unknown flag: --foo' })
     expect(error.name).toBe('Incur.ParseError')
     expect(error.shortMessage).toBe('Unknown flag: --foo')
+    expect(error.code).toBe('INVALID_ARGUMENT')
+    expect(error.retryable).toBe(false)
+    expect(error.exitCode).toBeUndefined()
+    expect(error).toBeInstanceOf(Errors.IncurError)
     expect(error).toBeInstanceOf(Errors.BaseError)
   })
 })
