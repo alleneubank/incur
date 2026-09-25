@@ -1022,6 +1022,30 @@ describe('serve', () => {
     `)
   })
 
+  test('--json is compact without a TTY and indented in a TTY', async () => {
+    const cli = Cli.create('test')
+    cli.command('ping', { run: () => ({ pong: true, tags: ['a'] }) })
+
+    const agent = await serve(cli, ['ping', '--json'])
+    ;(process.stdout as any).isTTY = true
+    const terminal = await serve(cli, ['ping', '--json'])
+    ;(process.stdout as any).isTTY = false
+
+    expect(agent.output).toMatchInlineSnapshot(`
+      "{"pong":true,"tags":["a"]}
+      "
+    `)
+    expect(terminal.output).toMatchInlineSnapshot(`
+      "{
+        "pong": true,
+        "tags": [
+          "a"
+        ]
+      }
+      "
+    `)
+  })
+
   test('--full-output outputs full error envelope for unknown command', async () => {
     const cli = Cli.create('test')
 
@@ -3272,7 +3296,7 @@ describe('built-in commands', () => {
       expect(output).toContain('Registered test as MCP server')
       expect(output).toContain('Try asking:')
       expect(output).toContain('"Check health"')
-      expect(output).toContain('"command": "pnpm test --mcp"')
+      expect(output).toContain('"command":"pnpm test --mcp"')
     } finally {
       spy.mockRestore()
     }

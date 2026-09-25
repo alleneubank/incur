@@ -432,7 +432,7 @@ Control with `--format <fmt>` or `--json`:
 | Flag            | Format   | Description                                  |
 | --------------- | -------- | -------------------------------------------- |
 | _(default)_     | TOON     | Token-efficient, ~40% fewer tokens than JSON |
-| `--format json` | JSON     | `JSON.parse()`-safe                          |
+| `--format json` | JSON     | `JSON.parse()`-safe; compact unless a TTY    |
 | `--format yaml` | YAML     | Human-readable                               |
 | `--format md`   | Markdown | Tables for docs/issues                       |
 

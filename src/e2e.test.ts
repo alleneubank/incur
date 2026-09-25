@@ -273,9 +273,7 @@ describe('output formats', () => {
   test('--format json', async () => {
     const { output } = await serve(createApp(), ['ping', '--format', 'json'])
     expect(output).toMatchInlineSnapshot(`
-      "{
-        "pong": true
-      }
+      "{"pong":true}
       "
     `)
   })
@@ -283,9 +281,7 @@ describe('output formats', () => {
   test('--json shorthand', async () => {
     const { output } = await serve(createApp(), ['ping', '--json'])
     expect(output).toMatchInlineSnapshot(`
-      "{
-        "pong": true
-      }
+      "{"pong":true}
       "
     `)
   })
@@ -303,9 +299,7 @@ describe('output formats', () => {
     cli.command('ping', { run: () => ({ pong: true }) })
     const { output } = await serve(cli, ['ping'])
     expect(output).toMatchInlineSnapshot(`
-      "{
-        "pong": true
-      }
+      "{"pong":true}
       "
     `)
   })
@@ -315,9 +309,7 @@ describe('output formats', () => {
     cli.command('ping', { format: 'json', run: () => ({ pong: true }) })
     const { output } = await serve(cli, ['ping'])
     expect(output).toMatchInlineSnapshot(`
-      "{
-        "pong": true
-      }
+      "{"pong":true}
       "
     `)
   })
@@ -327,9 +319,7 @@ describe('output formats', () => {
     cli.command('ping', { format: 'json', run: () => ({ pong: true }) })
     const { output } = await serve(cli, ['ping'])
     expect(output).toMatchInlineSnapshot(`
-      "{
-        "pong": true
-      }
+      "{"pong":true}
       "
     `)
   })
@@ -482,16 +472,7 @@ describe('--token-limit and --token-offset', () => {
       '20',
     ])
     expect(output).toMatchInlineSnapshot(`
-      "{
-        "ok": true,
-        "data": {
-          "pong": true
-        },
-        "meta": {
-          "command": "ping",
-          "duration": "<stripped>"
-        }
-      }
+      "{"ok":true,"data":{"pong":true},"meta":{"command":"ping","duration":"<stripped>"}}
       "
     `)
   })
@@ -3819,7 +3800,7 @@ async function serve(
   return {
     output: output
       .replace(/duration: \d+ms/g, 'duration: <stripped>')
-      .replace(/"duration": "\d+ms"/g, '"duration": "<stripped>"'),
+      .replace(/("duration": ?")\d+ms"/g, '$1<stripped>"'),
     exitCode,
   }
 }

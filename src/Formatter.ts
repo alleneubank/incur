@@ -7,18 +7,19 @@ import * as Yaml from './internal/yaml.js'
 export type Format = 'toon' | 'json' | 'yaml' | 'md' | 'jsonl'
 
 /** Serializes a value to the specified format. Defaults to TOON. */
-export function format(value: unknown, fmt: Format = 'toon'): string {
+export function format(value: unknown, fmt: Format = 'toon', options: format.Options = {}): string {
   if (value == null) return ''
   if (fmt === 'json') {
+    const space = options.pretty === false ? undefined : 2
     if (typeof value === 'string') {
       const trimmed = value.trim()
       if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
         try {
-          return JSON.stringify(JSON.parse(value), null, 2)
+          return JSON.stringify(JSON.parse(value), null, space)
         } catch {}
       }
     }
-    return Json.stringify(value, 2)
+    return Json.stringify(value, space)
   }
   if (fmt === 'yaml') return Yaml.loadSync().stringify(value)
   if (fmt === 'md') return formatMarkdown(value)
@@ -31,6 +32,18 @@ export function format(value: unknown, fmt: Format = 'toon'): string {
   const block = multilineStringField(value)
   if (block !== undefined) return block
   return encode(value as Record<string, unknown>)
+}
+
+export declare namespace format {
+  /** Options for {@link format}. */
+  type Options = {
+    /**
+     * Whether `json` output is indented for human reading. When `false`, `json` is written
+     * compactly on one line. Other formats are unaffected.
+     * @default true
+     */
+    pretty?: boolean | undefined
+  }
 }
 
 /** Whether a value is a scalar (string, number, boolean, null, undefined). */

@@ -511,7 +511,9 @@ export function create(
           const exit = serveOptions.exit ?? ((code: number) => process.exit(code))
           const { format: formatFlag, formatExplicit } = extractBuiltinFlags(argv)
           const format = formatExplicit ? formatFlag : 'toon'
-          const output = Formatter.format({ code, message }, format)
+          const output = Formatter.format({ code, message }, format, {
+            pretty: process.stdout.isTTY === true,
+          })
           stderrFn(output.endsWith('\n') ? output : `${output}\n`)
           exit(1)
           return
@@ -926,6 +928,12 @@ async function serveImpl(
     process.stdout.on('error', exitOnClosedStdout)
   const tty = process.stdout.isTTY === true
   let human = tty
+
+  // JSON is indented for a person reading a terminal and compact for agents and pipes,
+  // where indentation only costs tokens.
+  function formatOutput(value: unknown, fmt: Formatter.Format) {
+    return Formatter.format(value, fmt, { pretty: tty })
+  }
   const configEnabled = options.config !== undefined
   const configFlag = options.config?.flag
   const displayName = resolveDisplayName(name, options.aliases)
@@ -968,7 +976,7 @@ async function serveImpl(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (human) writelnErr(formatHumanError({ code: 'UNKNOWN', message }))
-    else writelnErr(Formatter.format({ code: 'UNKNOWN', message }, 'toon'))
+    else writelnErr(formatOutput({ code: 'UNKNOWN', message }, 'toon'))
     exit(1)
     return
   }
@@ -1014,7 +1022,7 @@ async function serveImpl(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (human) writeln(formatHumanError({ code: 'UNKNOWN', message }))
-      else writeln(Formatter.format({ code: 'UNKNOWN', message }, 'toon'))
+      else writeln(formatOutput({ code: 'UNKNOWN', message }, 'toon'))
       exit(1)
       return false
     }
@@ -1044,14 +1052,14 @@ async function serveImpl(
         if (result.command) lines.push(`  ${result.command}`)
         if (result.deferred) lines.push('  Installation will finish after this process exits.')
         writeln(lines.join('\n'))
-      } else writeln(Formatter.format(result, formatFlag))
+      } else writeln(formatOutput(result, formatFlag))
     } catch (error) {
       const output = {
         code: 'UPDATE_FAILED',
         message: error instanceof Error ? error.message : String(error),
       }
       if (human) writeln(formatHumanError(output))
-      else writeln(Formatter.format(output, formatFlag))
+      else writeln(formatOutput(output, formatFlag))
       exit(1)
     }
     return
@@ -1084,7 +1092,7 @@ async function serveImpl(
     } catch (err) {
       const code = err instanceof IncurError ? err.code : 'UNKNOWN'
       const message = err instanceof Error ? err.message : String(err)
-      writelnErr(Formatter.format({ code, message }, formatExplicit ? formatFlag : 'toon'))
+      writelnErr(formatOutput({ code, message }, formatExplicit ? formatFlag : 'toon'))
       exit(1)
     }
     return
@@ -1241,7 +1249,7 @@ async function serveImpl(
         return
       }
       writeManifest(
-        Formatter.format(
+        formatOutput(
           buildManifest(scopedCommands, prefix, options.globals?.schema, scopedRoot),
           formatFlag,
         ),
@@ -1257,7 +1265,7 @@ async function serveImpl(
       return
     }
     writeManifest(
-      Formatter.format(
+      formatOutput(
         buildIndexManifest(scopedCommands, prefix, options.globals?.schema, scopedRoot),
         formatFlag,
       ),
@@ -1324,7 +1332,7 @@ async function serveImpl(
       if (human) {
         writelnErr(formatHumanError({ code: 'COMMAND_NOT_FOUND', message }))
         writelnErr(formatHumanCta(cta))
-      } else writelnErr(Formatter.format({ code: 'COMMAND_NOT_FOUND', message, cta }, 'toon'))
+      } else writelnErr(formatOutput({ code: 'COMMAND_NOT_FOUND', message, cta }, 'toon'))
       exit(1)
       return
     }
@@ -1366,7 +1374,7 @@ async function serveImpl(
         writeln(lines.join('\n'))
       } catch (err) {
         writeln(
-          Formatter.format(
+          formatOutput(
             {
               code: 'LIST_SKILLS_FAILED',
               message: err instanceof Error ? err.message : String(err),
@@ -1436,11 +1444,11 @@ async function serveImpl(
         const output: Record<string, unknown> = { skills: result.paths }
         if (body) output.body = body
         if (fullOutput && result.agents.length > 0) output.agents = result.agents
-        writeln(Formatter.format(output, formatExplicit ? formatFlag : 'toon'))
+        writeln(formatOutput(output, formatExplicit ? formatFlag : 'toon'))
       }
     } catch (err) {
       writeln(
-        Formatter.format(
+        formatOutput(
           { code: 'SYNC_SKILLS_FAILED', message: err instanceof Error ? err.message : String(err) },
           formatExplicit ? formatFlag : 'toon',
         ),
@@ -1475,7 +1483,7 @@ async function serveImpl(
       if (human) {
         writelnErr(formatHumanError({ code: 'COMMAND_NOT_FOUND', message }))
         writelnErr(formatHumanCta(cta))
-      } else writelnErr(Formatter.format({ code: 'COMMAND_NOT_FOUND', message, cta }, 'toon'))
+      } else writelnErr(formatOutput({ code: 'COMMAND_NOT_FOUND', message, cta }, 'toon'))
       exit(1)
       return
     }
@@ -1489,7 +1497,7 @@ async function serveImpl(
     }
     if (sub!.name === 'doctor') {
       const result = await runMcpDoctor(name, commands, options)
-      writeln(Formatter.format(result, formatExplicit ? formatFlag : 'toon'))
+      writeln(formatOutput(result, formatExplicit ? formatFlag : 'toon'))
       if (!result.ok) exit(1)
       return
     }
@@ -1531,14 +1539,14 @@ async function serveImpl(
       writeln(lines.join('\n'))
       if (fullOutput || formatExplicit)
         writeln(
-          Formatter.format(
+          formatOutput(
             { name: mcpName, command: result.command, agents: result.agents },
             formatExplicit ? formatFlag : 'toon',
           ),
         )
     } catch (err) {
       writeln(
-        Formatter.format(
+        formatOutput(
           { code: 'MCP_ADD_FAILED', message: err instanceof Error ? err.message : String(err) },
           formatExplicit ? formatFlag : 'toon',
         ),
@@ -1775,7 +1783,7 @@ async function serveImpl(
       if (effectiveOpts) s.options = Schema.toJsonSchema(effectiveOpts)
       if (cmd.output) s.output = Schema.toJsonSchema(cmd.output)
       if (options.globals?.schema) s.globals = Schema.toJsonSchema(options.globals.schema)
-      writeln(Formatter.format(schemaResult, format))
+      writeln(formatOutput(schemaResult, format))
     } else {
       // Legacy `--schema` flag returns flat format: { args, env, options, output }
       const result: Record<string, unknown> = {}
@@ -1784,7 +1792,7 @@ async function serveImpl(
       if (effectiveOpts) result.options = Schema.toJsonSchema(effectiveOpts)
       if (cmd.output) result.output = Schema.toJsonSchema(cmd.output)
       if (options.globals?.schema) result.globals = Schema.toJsonSchema(options.globals.schema)
-      writeln(Formatter.format(result, format))
+      writeln(formatOutput(result, format))
     }
     return
   }
@@ -1916,13 +1924,13 @@ async function serveImpl(
     const writelnOut = output.ok ? writeln : writelnErr
     if (tokenCount) {
       const base = output.ok ? output.data : output.error
-      const formatted = base != null ? Formatter.format(base, format) : ''
+      const formatted = base != null ? formatOutput(base, format) : ''
       return writelnOut(String(estimateTokenCount(formatted)))
     }
     const cta = output.meta.cta
     if (human && !fullOutput) {
       if (output.ok && output.data != null && renderOutput) {
-        const t = truncate(Formatter.format(output.data, format))
+        const t = truncate(formatOutput(output.data, format))
         writeln(t.text)
       } else if (!output.ok) writelnErr(formatHumanError(output.error))
       if (cta) writelnOut(formatHumanCta(cta))
@@ -1933,9 +1941,9 @@ async function serveImpl(
         // Truncate data separately so meta (including nextOffset) is always visible
         const dataFormatted =
           output.ok && output.data != null
-            ? Formatter.format(output.data, format)
+            ? formatOutput(output.data, format)
             : !output.ok
-              ? Formatter.format(output.error, format)
+              ? formatOutput(output.error, format)
               : ''
         const t = truncate(dataFormatted)
         if (t.truncated) {
@@ -1945,20 +1953,20 @@ async function serveImpl(
           const meta: Record<string, unknown> = { ...output.meta }
           if (t.nextOffset != null) meta.nextOffset = t.nextOffset
           envelope.meta = meta
-          return writelnOut(Formatter.format(envelope, format))
+          return writelnOut(formatOutput(envelope, format))
         }
       }
-      return writelnOut(Formatter.format(output, format))
+      return writelnOut(formatOutput(output, format))
     }
     const base = output.ok ? output.data : output.error
-    const formatted = Formatter.format(base, format)
+    const formatted = formatOutput(base, format)
     if (!cta) {
       if (formatted) writelnOut(truncate(formatted).text)
       return
     }
     const payload =
       typeof base === 'object' && base !== null ? { ...base, cta } : { data: base, cta }
-    writelnOut(truncate(Formatter.format(payload, format)).text)
+    writelnOut(truncate(formatOutput(payload, format)).text)
   }
 
   if ('error' in effective) {

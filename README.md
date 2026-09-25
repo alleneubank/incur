@@ -653,6 +653,8 @@ $ my-cli status --format json
 
 Supported formats: `toon`, `json`, `yaml`, `md`, `jsonl`.
 
+JSON is indented when stdout is a terminal and compact (one line, no indentation) when stdout is a pipe or an agent, where indentation only costs tokens.
+
 ### Well-formed I/O
 
 Agents fail when they guess at argument formats or misinterpret output structure. incur eliminates this by declaring schemas for arguments, options, environment variables, and output – every input is validated before `run` executes, and every output has a known shape that agents can rely on without parsing heuristics:
